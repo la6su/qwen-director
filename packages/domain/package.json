@@ -1,0 +1,7 @@
+{
+  "name": "@qwendirector/domain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/job-state.ts" }
+}

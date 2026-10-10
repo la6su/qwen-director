@@ -1,0 +1,26 @@
+[Unit]
+Description=QwenDirector API (example)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Projects/QwenDirector
+# systemd user units do not source interactive shell profiles; keep Node/NPM explicit.
+Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env sh -lc 'QWEN_API_AUTOSTART=true QWEN_STORAGE=postgres DATABASE_URL="postgresql:///qwendirector?host=%%2Fvar%%2Frun%%2Fpostgresql" npm run db:migrate && exec env QWEN_API_AUTOSTART=true QWEN_STORAGE=postgres DATABASE_URL="postgresql:///qwendirector?host=%%2Fvar%%2Frun%%2Fpostgresql" npm --workspace apps/api run start'
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=%h/Documents/Projects/QwenDirector/.env
+Environment=QWEN_API_AUTOSTART=true
+Environment=QWEN_STORAGE=postgres
+Environment=DATABASE_URL=postgresql:///qwendirector?host=%%2Fvar%%2Frun%%2Fpostgresql
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Documents/Projects/QwenDirector/.data
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

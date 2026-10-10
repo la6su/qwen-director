@@ -1,0 +1,7 @@
+{
+  "name": "@qwendirector/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/generation.ts", "./requirements": "./src/requirements.ts", "./design": "./src/design.ts", "./design-importer": "./src/design-importer.ts", "./prompt": "./src/prompt.ts", "./planner": "./src/planner.ts" }
+}

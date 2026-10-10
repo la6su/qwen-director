@@ -1,0 +1,8 @@
+{
+  "name": "@qwendirector/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/loop.ts", "./executor": "./src/executor.ts", "./http-hooks": "./src/http-hooks.ts" },
+  "scripts": { "start": "tsx src/main.ts" }
+}

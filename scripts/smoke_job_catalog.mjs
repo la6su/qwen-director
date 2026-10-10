@@ -1,0 +1,1 @@
+import assert from 'node:assert/strict'; process.env.QWEN_STORAGE='memory'; process.env.QWEN_API_AUTOSTART='false'; const {app}=await import('../apps/api/src/index.ts'); const response=await app.inject({method:'GET',url:'/v1/jobs'}); assert.equal(response.statusCode,501); await app.close(); console.log('OK: job catalog respects storage capability boundary');

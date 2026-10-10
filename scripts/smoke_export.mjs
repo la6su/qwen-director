@@ -1,0 +1,13 @@
+const base = process.env.QWEN_API_URL ?? 'http://127.0.0.1:4310';
+const jobsResponse = await fetch(`${base}/v1/jobs`);
+if (!jobsResponse.ok) throw new Error(`JOBS_${jobsResponse.status}`);
+const jobs = (await jobsResponse.json()).jobs ?? [];
+const job = jobs.find((item) => item.state === 'succeeded');
+if (!job) throw new Error('NO_SUCCEEDED_JOB');
+const response = await fetch(`${base}/v1/jobs/${job.id}/export`);
+if (!response.ok) throw new Error(`EXPORT_${response.status}`);
+if (!(response.headers.get('content-disposition') ?? '').includes('attachment')) throw new Error('MISSING_ATTACHMENT_HEADER');
+if (response.headers.get('cache-control') !== 'no-store') throw new Error('MISSING_NO_STORE');
+const manifest = await response.json();
+if (manifest.job_id !== job.id) throw new Error('MANIFEST_JOB_MISMATCH');
+console.log(`OK: manifest export for succeeded job ${job.id}`);

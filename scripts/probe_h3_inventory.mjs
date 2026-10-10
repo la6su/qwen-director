@@ -1,0 +1,12 @@
+const baseUrl = process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188';
+const response = await fetch(`${baseUrl}/object_info`);
+if (!response.ok) throw new Error(`COMFY_OBJECT_INFO_${response.status}`);
+const info = await response.json();
+const loader = info.LoraLoaderModelOnly;
+const loras = Array.isArray(loader?.input?.required?.lora_name?.[0]) ? loader.input.required.lora_name[0].filter((name) => typeof name === 'string') : [];
+const h3Loras = loras.filter((name) => /minimax.*h3|h3.*minimax/i.test(name));
+const ref2vLoras = h3Loras.filter((name) => /ref2v|ref2va/i.test(name));
+const fl2vLoras = h3Loras.filter((name) => /fl2v|fl2va/i.test(name));
+const qualityCandidates = { ref2v8step: ref2vLoras.filter((name) => /8step/i.test(name)), ref2v4step: ref2vLoras.filter((name) => /4step/i.test(name)) };
+const optimizationNodes = ['MiniMaxH3MemoryEfficientSageAttentionPatch', 'EasyCache', 'LazyCache', 'LatentUpscale', 'LatentUpscaleBy'].filter((name) => name in info);
+console.log(JSON.stringify({ baseUrl, h3Loras, ref2vLoras, fl2vLoras, qualityCandidates, optimizationNodes, h3Nodes: ['MiniMaxH3ReferenceToVideo', 'MiniMaxH3ImageToVideo', 'EmptyMiniMaxH3LatentAV'].filter((name) => name in info) }, null, 2));

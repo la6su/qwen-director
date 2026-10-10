@@ -1,0 +1,2 @@
+import assert from 'node:assert/strict'; import { createH3StarterWorkflow } from '../packages/workflow-adapters/src/h3-profile.ts'; import { validateH3Workflow } from '../packages/workflow-adapters/src/h3-workflow.ts';
+const graph=createH3StarterWorkflow(); const boundary=validateH3Workflow(graph); assert.equal(boundary.h3NodeId,'6'); assert.equal(boundary.noiseNodeId,'5'); assert.equal(boundary.saveNodeId,'7'); console.log('OK: H3 starter workflow satisfies boundary contract');

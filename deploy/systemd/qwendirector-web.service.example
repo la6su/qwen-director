@@ -1,0 +1,22 @@
+[Unit]
+Description=QwenDirector web UI (production preview)
+After=network-online.target qwendirector-api.service
+Wants=network-online.target qwendirector-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Projects/QwenDirector
+Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env npm --workspace apps/web run preview
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=%h/Documents/Projects/QwenDirector/.env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Documents/Projects/QwenDirector/apps/web/dist
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

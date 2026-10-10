@@ -1,0 +1,26 @@
+[Unit]
+Description=QwenDirector worker (example)
+After=network-online.target qwendirector-api.service
+Wants=network-online.target qwendirector-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Projects/QwenDirector
+Environment=PATH=%h/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env npm --workspace apps/worker run start
+Restart=on-failure
+RestartSec=3
+EnvironmentFile=%h/Documents/Projects/QwenDirector/.env
+Environment=QWEN_API_BASE_URL=http://127.0.0.1:4310
+Environment=QWEN_NODE_ID=00000000-0000-4000-8000-000000000001
+Environment=QWEN_INSTANCE_ID=local-qwen
+ExecStartPre=/usr/bin/env sh -lc 'for i in $(seq 1 30); do /usr/bin/curl -fsS http://127.0.0.1:4310/ready >/dev/null && exit 0; sleep 1; done; exit 1'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Documents/Projects/QwenDirector/.data
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

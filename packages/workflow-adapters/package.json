@@ -1,0 +1,9 @@
+{
+  "name": "@qwendirector/workflow-adapters",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/mock.ts", "./backend": "./src/backend.ts", "./router": "./src/router.ts", "./executors": "./src/executors.ts", "./mcp": "./src/mcp.ts" },
+  "dependencies": { "@qwendirector/contracts": "0.0.0", "@qwendirector/worker": "0.0.0" },
+  "exports": { ".": "./src/backend.ts", "./executors": "./src/executors.ts", "./h3-workflow": "./src/h3-workflow.ts", "./h3-profile": "./src/h3-profile.ts", "./comfy-upload": "./src/comfy-upload.ts", "./workbenches": "./src/workbenches.ts", "./workbench-catalog": "./src/workbench-catalog.ts", "./router": "./src/router.ts", "./mcp": "./src/mcp.ts" }
+}

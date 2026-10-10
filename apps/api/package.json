@@ -1,0 +1,9 @@
+{
+  "name": "@qwendirector/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/http-contract.ts", "./repository": "./src/repository.ts", "./pg-repository": "./src/pg-repository.ts", "./pg-nodes": "./src/pg-nodes.ts", "./storage-factory": "./src/storage-factory.ts" },
+  "scripts": { "start": "tsx src/index.ts" },
+  "dependencies": { "pg": "^8.16.3", "@qwendirector/storage": "0.0.0" }
+}

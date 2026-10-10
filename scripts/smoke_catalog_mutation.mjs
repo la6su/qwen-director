@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import pg from 'pg';
+process.env.QWEN_STORAGE='postgres'; process.env.QWEN_API_AUTOSTART='false'; process.env.DATABASE_URL ??= 'postgresql:///qwendirector';
+const { app } = await import('../apps/api/src/index.ts');
+const pool = new pg.Pool({host:'/var/run/postgresql',user:process.env.PGUSER ?? 'la6',database:'qwendirector'});
+const projectResponse = await app.inject({method:'POST',url:'/v1/projects',payload:{name:`mutation-${randomUUID()}`} });
+assert.equal(projectResponse.statusCode,201); const project = projectResponse.json();
+let scene;
+try {
+  const sceneResponse = await app.inject({method:'POST',url:`/v1/projects/${project.id}/scenes`,payload:{title:'Scene 01'}}); assert.equal(sceneResponse.statusCode,201); scene=sceneResponse.json();
+  const scene2Response = await app.inject({method:'POST',url:`/v1/projects/${project.id}/scenes`,payload:{title:'Scene 02'}}); assert.equal(scene2Response.statusCode,201); const scene2=scene2Response.json();
+  const reorderedScenes = await app.inject({method:'PATCH',url:`/v1/projects/${project.id}/scenes/order`,payload:{sceneIds:[scene2.id,scene.id]}}); assert.equal(reorderedScenes.statusCode,200); assert.deepEqual(reorderedScenes.json().scenes.map((item)=>item.id),[scene2.id,scene.id]);
+  const invalidSceneOrder = await app.inject({method:'PATCH',url:`/v1/projects/${project.id}/scenes/order`,payload:{sceneIds:[scene.id,scene.id]}}); assert.equal(invalidSceneOrder.statusCode,400);
+  const shotResponse = await app.inject({method:'POST',url:`/v1/scenes/${scene.id}/shots`,payload:{title:'Shot 01',durationSeconds:5}}); assert.equal(shotResponse.statusCode,201); const shot=shotResponse.json();
+  const shot2Response = await app.inject({method:'POST',url:`/v1/scenes/${scene.id}/shots`,payload:{title:'Shot 02',durationSeconds:3}}); assert.equal(shot2Response.statusCode,201); const shot2=shot2Response.json();
+  assert.equal(shot.position, 1);
+  assert.equal(shot2.position, 2);
+  const reorderedShots = await app.inject({method:'PATCH',url:`/v1/scenes/${scene.id}/shots/order`,payload:{shotIds:[shot2.id,shot.id]}}); assert.equal(reorderedShots.statusCode,200); assert.deepEqual(reorderedShots.json().shots.map((item)=>item.id),[shot2.id,shot.id]);
+  assert.equal((await app.inject({method:'PATCH',url:`/v1/projects/${project.id}`,payload:{name:'Renamed project'}})).statusCode,200);
+  assert.equal((await app.inject({method:'PATCH',url:`/v1/scenes/${scene.id}`,payload:{title:'Renamed scene'}})).statusCode,200);
+  assert.equal((await app.inject({method:'PATCH',url:`/v1/shots/${shot.id}`,payload:{title:'Renamed shot'}})).statusCode,200);
+  const before = (await pool.query('select (select count(*) from projects where id=$1)::int as projects,(select count(*) from scenes where id=$2)::int as scenes,(select count(*) from shots where id=$3)::int as shots',[project.id,scene.id,shot.id])).rows[0];
+  const jobBody={project:'Renamed project',scene:'Renamed scene',shot:'Renamed shot',projectId:project.id,sceneId:scene.id,shotId:shot.id,idempotencyKey:'catalog-retry',prompt:'catalog reuse smoke',adapterId:'llama.cpp'};
+  const jobResponse = await app.inject({method:'POST',url:'/v1/director/jobs',payload:jobBody}); assert.equal(jobResponse.statusCode,201);
+  const replay = await app.inject({method:'POST',url:'/v1/director/jobs',payload:jobBody}); assert.equal(replay.statusCode,201); assert.equal(replay.json().replayed,true);
+  const reordered = { adapterId:'llama.cpp',prompt:'catalog reuse smoke',shotId:shot.id,sceneId:scene.id,projectId:project.id,shot:'Renamed shot',scene:'Renamed scene',project:'Renamed project',idempotencyKey:'catalog-retry' };
+  const reorderedReplay = await app.inject({method:'POST',url:'/v1/director/jobs',payload:reordered}); assert.equal(reorderedReplay.statusCode,201); assert.equal(reorderedReplay.json().replayed,true);
+  const conflict = await app.inject({method:'POST',url:'/v1/director/jobs',payload:{...jobBody,prompt:'changed'}}); assert.equal(conflict.statusCode,409);
+  const after = (await pool.query('select (select count(*) from projects where id=$1)::int as projects,(select count(*) from scenes where id=$2)::int as scenes,(select count(*) from shots where id=$3)::int as shots',[project.id,scene.id,shot.id])).rows[0]; assert.deepEqual(after,before);
+  const stored = (await pool.query('select plan_json->\'catalog\' as catalog from jobs where id=$1',[jobResponse.json().jobId])).rows[0].catalog; assert.deepEqual(stored,{projectId:project.id,sceneId:scene.id,shotId:shot.id});
+  const catalog = await app.inject({method:'GET',url:`/v1/projects/${project.id}`}); assert.equal(catalog.json().scenes[0].title, 'Renamed scene'); const catalogShots=catalog.json().scenes[0].shots; const renamedShot=catalogShots.find((item)=>item.shotId===shot.id); assert.equal(renamedShot.title, 'Renamed shot'); assert.equal(Number(renamedShot.durationSeconds), 5);
+  const missing = await app.inject({method:'POST',url:`/v1/projects/${randomUUID()}/scenes`,payload:{title:'bad'}}); assert.equal(missing.statusCode,404);
+  console.log('OK: project/scene/shot catalog mutation');
+} finally {
+  await pool.query('delete from approvals where job_id in (select id from jobs where shot_id in (select id from shots where scene_id in (select id from scenes where project_id=$1)))',[project.id]);
+  await pool.query('delete from jobs where shot_id in (select id from shots where scene_id in (select id from scenes where project_id=$1))',[project.id]);
+  await pool.query('delete from shots where scene_id in (select id from scenes where project_id=$1)',[project.id]);
+  await pool.query('delete from scenes where project_id=$1',[project.id]);
+  await pool.query('delete from projects where id=$1',[project.id]);
+  await pool.end(); await app.close();
+}

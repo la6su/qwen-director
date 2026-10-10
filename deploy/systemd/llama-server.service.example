@@ -1,0 +1,20 @@
+[Unit]
+Description=Local llama.cpp server (example)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Текущий launcher пользователя уже задаёт production-параметры; этот unit — будущий
+# управляемый вариант после проверки GPU и переноса параметров из /home/la6/bin/qwen35-worker.sh.
+ExecStart=%h/src/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8081 --model %h/models/qwen35-9b-neo/Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-MTP-Q5_K_M.gguf
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/models
+
+[Install]
+WantedBy=default.target

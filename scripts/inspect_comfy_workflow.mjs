@@ -1,0 +1,10 @@
+import { readFile } from 'node:fs/promises';
+const file = process.argv[2];
+if (!file) throw new Error('USAGE: inspect_comfy_workflow <workflow.json>');
+const document = JSON.parse(await readFile(file, 'utf8'));
+const nodes = Array.isArray(document.nodes) ? document.nodes : Object.entries(document).map(([id, node]) => ({ id, ...node }));
+const required = ['MiniMaxH3ReferenceToVideo', 'RandomNoise', 'SaveVideo'];
+const counts = Object.fromEntries(required.map((type) => [type, nodes.filter((node) => node.type === type || node.class_type === type).length]));
+const missing = required.filter((type) => counts[type] !== 1);
+if (missing.length) throw new Error(`H3_WORKFLOW_BOUNDARY_INVALID:${missing.join(',')}`);
+console.log(JSON.stringify({ format: document.nodes ? 'comfyui-ui' : 'prompt', nodes: nodes.length, boundary: counts }, null, 2));

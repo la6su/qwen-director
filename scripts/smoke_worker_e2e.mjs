@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import pg from 'pg';
+process.env.QWEN_STORAGE='postgres'; process.env.DATABASE_URL='postgresql:///qwendirector'; process.env.QWEN_API_AUTOSTART='false';
+const root = await mkdtemp(join(tmpdir(), 'qwendirector-e2e-')); process.env.QWEN_ASSET_ROOT = root;
+const { app } = await import('../apps/api/src/index.ts'); const { execute } = await import('../apps/worker/src/executor.ts'); const { HttpExecutionHooks } = await import('../apps/worker/src/http-hooks.ts');
+const pool = new pg.Pool({ host:'/var/run/postgresql', database:'qwendirector' }); const server = await app.listen({host:'127.0.0.1',port:0}); const base = server;
+const [project, scene, shot, job, node] = Array.from({length:5}, randomUUID); const bytes = Buffer.from('worker-e2e-output'); const sha = createHash('sha256').update(bytes).digest('hex');
+try {
+  await pool.query('insert into projects(id,name) values($1,$2)',[project,'e2e']); await pool.query('insert into scenes(id,project_id,title,position) values($1,$2,$3,1)',[scene,project,'scene']); await pool.query('insert into shots(id,scene_id,title,position) values($1,$2,$3,1)',[shot,scene,'shot']); await pool.query("insert into nodes(id,instance_id,capabilities,status,heartbeat_at) values($1,'e2e','{}','online',now())",[node]); await pool.query("insert into jobs(id,shot_id,state,plan_hash,idempotency_key,request_hash,adapter_id,plan_json) values($1,$2,'awaiting_approval','plan','key','request','mock','{}')",[job,shot]);
+  const { PgAttemptRepository } = await import('../apps/api/src/pg-repository.ts'); const repo = new PgAttemptRepository(pool); await repo.jobs.approve(job,'plan','e2e'); const attempt = await repo.claim(job,node); const ctx={jobId:job,attemptId:attempt.id,fencingToken:Number(attempt.fencingToken),planHash:'plan'}; const hooks = new HttpExecutionHooks(base);
+  const adapter={prepare:async()=>{},submit:async()=>({externalRunId:'e2e'}),poll:async()=>({state:'succeeded'}),collect:async()=>({adapter:'mock',outputs:[{logicalName:'take.txt',mimeType:'text/plain',contentBase64:bytes.toString('base64')}]})};
+  await execute(ctx,adapter,hooks); const linked=await pool.query('select asset_version_id from attempt_assets where attempt_id=$1',[attempt.id]); assert.equal(linked.rowCount,1); const manifest=await repo.getManifest(attempt.id); assert.equal(manifest.manifest.outputs[0].assetVersionId,linked.rows[0].asset_version_id); console.log('OK: worker HTTP hooks → CAS upload → AssetVersion → enriched manifest');
+} finally { await pool.query('delete from attempt_manifests where attempt_id in(select id from attempts where job_id=$1)',[job]); await pool.query('delete from attempt_assets where attempt_id in(select id from attempts where job_id=$1)',[job]); await pool.query('delete from asset_versions where sha256=$1',[sha]); await pool.query('delete from attempts where job_id=$1',[job]); await pool.query('delete from approvals where job_id=$1',[job]); await pool.query('delete from jobs where id=$1',[job]); await pool.query('delete from nodes where id=$1',[node]); await pool.query('delete from shots where id=$1',[shot]); await pool.query('delete from scenes where id=$1',[scene]); await pool.query('delete from projects where id=$1',[project]); await pool.end(); await app.close(); await rm(root,{recursive:true,force:true}); }

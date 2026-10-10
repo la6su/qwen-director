@@ -1,0 +1,2 @@
+alter table workflow_profile_revisions drop constraint if exists workflow_profile_revisions_profile_id_fkey;
+alter table workflow_profile_revisions add constraint workflow_profile_revisions_profile_id_fkey foreign key (profile_id) references workflow_profiles(id) on delete cascade;

@@ -1,0 +1,3 @@
+import assert from 'node:assert/strict';
+import { createH3WorkflowProfile, injectH3Inputs } from '../packages/workflow-adapters/src/h3-profile.ts';
+const p=createH3WorkflowProfile('p','h3',{'a':{class_type:'MiniMaxH3ReferenceToVideo',inputs:{}},'b':{class_type:'RandomNoise',inputs:{}},'c':{class_type:'SaveVideo',inputs:{}}}); const graph=injectH3Inputs(p,{prompt:'compiled',width:1920,height:1080,length:81,seed:7,filenamePrefix:'qwendirector/job'}); assert.equal(graph.a.inputs.prompt,'compiled'); assert.equal(graph.a.inputs.length,81); assert.equal(graph.b.inputs.noise_seed,7); assert.equal(graph.c.inputs.filename_prefix,'qwendirector/job'); assert.deepEqual(p.graph.a.inputs,{}); console.log('OK: worker H3 snapshot injection preserves profile immutability');
