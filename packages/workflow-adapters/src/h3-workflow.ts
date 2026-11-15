@@ -4,6 +4,15 @@ export type ComfyApiWorkflow = Record<string, { class_type?: string; inputs?: Re
 export type H3WorkflowBoundary = { h3NodeId: string; noiseNodeId: string; saveNodeId: string; mode?: 'r2v-2stage-veda' | 'i2va-i2v' | 'fl2va-i2v'; noiseNodeIds?: string[]; videoNodeIds?: string[]; finalVideoNodeId?: string; promptNodeId?: string; durationNodeId?: string; resolutionNodeId?: string; megapixelsNodeId?: string; imageNodeIds?: string[] };
 
 const linkedNodeId = (value: unknown) => Array.isArray(value) && typeof value[0] === 'string' ? value[0] : undefined;
+function validatePromptInjectionBinding(workflow: ComfyApiWorkflow, h3NodeId: string): void {
+  const prompt = workflow[h3NodeId]?.inputs?.prompt;
+  if (typeof prompt === 'string') return;
+  const sourceId = linkedNodeId(prompt);
+  const source = sourceId ? workflow[sourceId] : undefined;
+  if (source && ['PrimitiveStringMultiline', 'PrimitiveString'].includes(source.class_type ?? '') && typeof source.inputs?.value === 'string') return;
+  throw new Error('H3_PROMPT_BINDING_REQUIRED');
+}
+
 function isUpstream(graph: ComfyApiWorkflow, from: string, target: string, seen = new Set<string>()): boolean {
   if (from === target) return true;
   if (seen.has(from)) return false;
@@ -95,9 +104,10 @@ export async function preflightH3Runtime(baseUrl: string, workflow?: ComfyApiWor
   const classes = Object.keys(info);
   if (workflow) validateComfyApiWorkflowSchema(workflow, info, 'COMFY_WORKFLOW_SCHEMA_MISMATCH');
   const boundary = workflow ? validateH3Workflow(workflow) : undefined;
+  if (workflow && boundary?.mode !== 'r2v-2stage-veda') validatePromptInjectionBinding(workflow, boundary!.h3NodeId);
   const requiredNodes = boundary?.mode === 'r2v-2stage-veda'
     ? ['MiniMaxH3ReferenceToVideo', 'RandomNoise', 'VHS_VideoCombine', 'MMH3UltimateUpscale', 'VedaSparseAttention']
-    : [boundary?.mode === 'fl2va-i2v' ? 'MiniMaxH3ImageToVideo' : 'MiniMaxH3ReferenceToVideo', 'RandomNoise', 'SaveVideo'];
+    : [boundary?.mode === 'fl2va-i2v' || boundary?.mode === 'i2va-i2v' ? 'MiniMaxH3ImageToVideo' : 'MiniMaxH3ReferenceToVideo', 'RandomNoise', 'SaveVideo'];
   for (const required of requiredNodes) if (!classes.includes(required)) throw new Error(`COMFY_MISSING_NODE:${required}`);
   if (!workflow) return { classes };
   const loras = Object.values(workflow).filter((node) => node?.class_type === 'LoraLoaderModelOnly').map((node) => node.inputs?.lora_name).filter((name): name is string => typeof name === 'string' && name.length > 0);
@@ -105,6 +115,22 @@ export async function preflightH3Runtime(baseUrl: string, workflow?: ComfyApiWor
   const availableLoras = Array.isArray(loader?.input?.required?.lora_name?.[0]) ? loader.input.required.lora_name[0].filter((name: unknown): name is string => typeof name === 'string') : [];
   const missingLoras = loras.filter((name) => !availableLoras.includes(name));
   if (missingLoras.length) throw new Error(`COMFY_MISSING_LORA:${missingLoras.join(',')}`);
+  const fileInputs: Record<string, string[]> = {
+    UNETLoader: ['unet_name'], CheckpointLoaderSimple: ['ckpt_name'],
+    LoraLoaderModelOnly: ['lora_name'], CLIPLoader: ['clip_name'], VAELoader: ['vae_name'],
+    DualCLIPLoader: ['clip_name1', 'clip_name2'], TripleCLIPLoader: ['clip_name1', 'clip_name2', 'clip_name3'],
+    MiniMaxH3PDDAccApply: ['pdd_file'],
+  };
+  for (const [nodeId, node] of Object.entries(workflow)) {
+    for (const key of fileInputs[node?.class_type ?? ''] ?? []) {
+      const value = node.inputs?.[key];
+      if (typeof value !== 'string' || !value) continue;
+      const options = (info[node.class_type!] as any)?.input?.required?.[key]?.[0]
+        ?? (info[node.class_type!] as any)?.input?.optional?.[key]?.[0];
+      if (!Array.isArray(options)) throw new Error(`COMFY_MODEL_CATALOG_UNAVAILABLE:${nodeId}:${node.class_type}:${key}`);
+      if (!options.includes(value)) throw new Error(`COMFY_MISSING_MODEL:${nodeId}:${node.class_type}:${key}:${value}`);
+    }
+  }
   if (Object.values(workflow).some((node) => node?.class_type === 'MiniMaxH3ReferenceToVideo') && loras.some((name) => /fl2v/i.test(name))) throw new Error(`COMFY_INCOMPATIBLE_LORA:FL2V_FOR_REF2V:${loras.filter((name) => /fl2v/i.test(name)).join(',')}`);
   if (boundary?.mode === 'fl2va-i2v' && loras.some((name) => /pika.*flex.*ref2va/i.test(name))) throw new Error(`COMFY_INCOMPATIBLE_LORA:REF2V_FOR_FL2VA:${loras.filter((name) => /pika.*flex.*ref2va/i.test(name)).join(',')}`);
   if (boundary?.mode === 'fl2va-i2v') {
@@ -125,6 +151,7 @@ export async function preflightH3RefModRuntime(baseUrl: string, workflow: ComfyA
   if (!response.ok) throw new Error(`COMFY_OBJECT_INFO_${response.status}`);
   const info = await response.json() as Record<string, any>;
   validateComfyApiWorkflowSchema(workflow, info, 'COMFY_WORKFLOW_SCHEMA_MISMATCH');
+  validatePromptInjectionBinding(workflow, boundary.h3NodeId);
   for (const required of ['MiniMaxH3ImageToVideo', 'MiniMaxH3RefModsLoader', 'MiniMaxH3RefModApply', 'RandomNoise', 'SaveVideo', 'LoadImage']) if (!info[required]) throw new Error(`COMFY_MISSING_NODE:${required}`);
   const options = info.MiniMaxH3RefModsLoader?.input?.required?.mod_1?.[0];
   const availableMods = Array.isArray(options) ? options.filter((item: unknown): item is string => typeof item === 'string' && item !== '(none)') : [];

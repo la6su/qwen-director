@@ -58,7 +58,7 @@ Project-level source media — отдельные ссылки на `AssetVersio
 
 ## ComfyUI mapping
 
-Workflow template хранится как версионированный JSON с digest и allowlisted custom nodes. Mapping связывает поля GenerationSpec с конкретными node inputs; эти node IDs не попадают в Shot. Prepare проверяет наличие нужных custom nodes, моделей, допустимых путей и форматов. Никаких auto-install custom nodes, downloads или произвольных HTTP URL из пользовательского workflow.
+Workflow template хранится как версионированный JSON с digest и allowlisted custom nodes. Mapping связывает поля GenerationSpec с конкретными node inputs; эти node IDs не попадают в Shot. Prepare проверяет наличие нужных custom nodes, точных имён файлов в live dropdown ComfyUI для поддерживаемых loader nodes (`UNETLoader`, checkpoint/CLIP/VAE, LoRA и H3 PDD), допустимых путей и форматов. Если runtime не отдаёт каталог файла, preflight fail-closed; отсутствующий файл не должен обнаруживаться только после постановки job в очередь. Никаких auto-install custom nodes, downloads или произвольных HTTP URL из пользовательского workflow.
 
 Профили workflow сохраняются как неактивные кандидаты. `POST /preflight` и `POST /test` проверяют graph/runtime без изменения active state. Отдельная активация revision сначала повторно проходит live schema/model/LoRA preflight и только затем разрешает использовать граф для новых jobs; новый профиль не становится выбором по умолчанию при сохранении.
 
@@ -83,6 +83,8 @@ FL2VA принимает длительность от 124 кадров на с�
 `MiniMaxH3ImageToVideo` с единственным подключённым `first_frame → LoadImage` является I2VA; с двумя различными подключениями `first_frame` и `last_frame` — FL2VA. I2VA profile автоматически связывает ровно один loader с `first_frame`, а job требует ровно один image AssetVersion с ролью `first-frame`. FL2VA сохраняет существующий контракт ровно двух кадров с ролями `first-frame` и `last-frame` в том же порядке, что и node inputs. Оба режима отвергают отсутствующий/неверный first frame, одинаковые frame nodes и графы с несовместимыми RefMod nodes. Для I2VA и FL2VA число кадров должно быть не меньше 56 и лежать на сетке `17k+5`.
 
 Базовые H3 режимы I2VA/FL2VA используют prompt compiler с первой строкой alignment (только для keyframe mode), затем в точном порядке `integrated_multimodal_description`, `overall_soundscape`, `non_diegetic_music`. Ref2VA остаётся отдельной шестисекционной схемой, а `compileDirectorPrompt` предназначен для нережимных workbench briefs и не используется для H3 video prompt. Компиляция не доказывает качество результата; sampler/profile revision и ручное approval остаются неизменными.
+
+Live H3 preflight выбирает `MiniMaxH3ImageToVideo` для обоих keyframe boundaries (`i2va-i2v` и `fl2va-i2v`), а `MiniMaxH3ReferenceToVideo` — для R2V/VEDA. Для H3 graph обязателен prompt binding, который worker умеет инъецировать напрямую или через `PrimitiveStringMultiline`/`PrimitiveString`; иначе профиль отклоняется до создания исполняемого job. Помимо class/input/link validation, preflight сверяет literal model filenames для поддерживаемых Comfy loader nodes с их live `/object_info` dropdown options; отсутствие каталога — явная ошибка, а не пропуск проверки. Это ранняя проверка доступности, не проверка загрузки весов в GPU и не generation success.
 
 ### H3 R2V двухэтапный VEDA boundary
 
