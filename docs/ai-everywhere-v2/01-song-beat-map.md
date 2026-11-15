@@ -1,13 +1,17 @@
 # AI Everywhere v2 — song / beat map
 
 Версия: 0.1 · Статус: `PROPOSED / UNAPPROVED` · Дата: 2026-11-15
-Источники: оригинальная лирика пользователя (`LYR-01…LYR-22` ниже); `/home/la6/AI-Everywhere.mp3`; v22 EDL.
+Источники: оригинальная лирика пользователя (`LYR-01…LYR-22` ниже); `/home/la6/AI-Everywhere.mp3`; v22 EDL; машинная exploratory-карта `audio-markers.json`.
 Утверждено: длительность мастер-трека 164.520 s; текст оригинальной песни; режиссёрский принцип «из темноты — свет» и открывающий переход «тёмная комната → тёмный экран → один цифровой мир» как starting material.
 Непроверено: слова по кадрам/времени, точные вдохи, музыкальные downbeats и границы вокальных фраз. Все показанные интервалы — `GRID_ONLY / UNVERIFIED`.
 
 ## song structure / rhythm_curve / progress
 
 `OBSERVED`: master длится 164.520 s. Текущий EDL хранит `bar_grid_bpm=140`, onset autocorrelation `139.85` и approximate phase `0.08 s`; это прежняя оценка, не вокальная разметка. Свежая грубая локальная проверка декодированного master (ffmpeg → mono 22.05 kHz, 20 ms RMS novelty, autocorrelation) неоднозначна: сильные соседние пики около 142.86 и 136.36 BPM; scoring 140-BPM phase дал около 0.025 s, но этот метод не доказывает downbeat. Первый устойчивый сигнал по условному −55 dB RMS threshold около 0.18 s — это не обязательно начало вокала. Значит 140 BPM и исходные 7 окон остаются только `PROPOSED / GRID_ONLY`. 96 тактов при ровно 140 BPM занимают 164.571 s, на 0.051 s длиннее аудио; не растягивать master и не подгонять слова. Ни один downbeat/слог не проверен прослушиванием.
+
+`OBSERVED / MACHINE CANDIDATES`: `scripts/analyze_master_audio.py` локально декодировал master через ffmpeg и собрал 271 spectral-flux peak candidate в `audio-markers.json`. В каждом маркере есть время с hop около 10 ms и эквивалентная координата кадра 24 fps. Они отсортированы и укладываются в длительность аудио. Это только набор точек для последующего прослушивания: модель не классифицирует kick/snare, не подтверждает такт/downbeat и не размечает вокал. В системе не найден локальный ASR runtime/вес; 23 `LYR-*` entries имеют пустые in/out и статус `UNVERIFIED_NO_LOCAL_ASR`. Исходный MP3 не изменён; SHA-256 `5369d3fead4b4c335be16e90d1089f8bc085abe4cb328e1fb5b1a79e40bdc154`.
+
+Повторить анализ на той же машине: `python3 scripts/analyze_master_audio.py --input /home/la6/AI-Everywhere.mp3 --output docs/ai-everywhere-v2/audio-markers.json`. Нужны только уже установленные ffmpeg/ffprobe и NumPy; скрипт ничего не устанавливает и не переписывает аудио.
 
 | Scene / section ID | Working interval | Bars (hypothesis) | Dramatic pressure / rhythm | Lyric IDs | Status |
 |---|---:|---:|---|---|---|
@@ -31,7 +35,7 @@
 | `AE-SC06` | `fe89ed72-cfb5-4dcd-a1a4-49350f340a85`, `e18c547c-6f29-4102-b40c-a3bb0f9699a2`, `59b4315e-3096-4c2f-b5de-9b5c0e1eeb7c` | `83ebabc7-060f-4756-8669-8769286dd38d`, `97596f40-79ae-4b4f-b409-457d0d4af813`, `32d8dfc8-e86d-4790-85f3-8c653eebd305` | Raw world assets; only inherited motifs should remain in final synthesis. |
 | `AE-SC07` | `2f553d90-1dc7-422c-836b-b977a0c16eb3`, `357eb721-9819-4912-928e-3c1de4f884b5`, `29c52556-6408-4d2c-a173-46456ad8bc3d` | `dde85ea2-d439-436e-9644-d8acc923e264`, `8060cadc-6f47-44dd-933e-0b30d89c9f41`, `3b1d9a3a-22fa-4ba2-9fc3-a9880f52dd6b` | Return-to-room candidates; late observatory is not automatically retained. |
 
-`progress`: структура секций `partial`; lyric phrase-to-time pass `blocked_pending_listen`; downbeat pass `UNVERIFIED` (coarse signal analysis insufficient); generation `not_started_by_design`; no approved picture lock.
+`progress`: структура секций `partial`; 271 candidate transient markers подготовлены для playback review; lyric phrase-to-time pass `blocked_pending_listen`; downbeat pass `UNVERIFIED` (coarse signal analysis insufficient); generation `not_started_by_design`; no approved picture lock.
 
 ## lyrics / units / beats
 
