@@ -28,6 +28,7 @@
     "smoke:prompt": "node --import tsx scripts/smoke_prompt.mjs",
     "smoke:plan-hash": "node --import tsx scripts/smoke_plan_hash.mjs",
     "smoke:worker-e2e": "node --import tsx scripts/smoke_worker_e2e.mjs",
+    "smoke:h3-worker-e2e": "node --import tsx scripts/smoke_h3_worker_e2e.mjs",
     "smoke:comfy-collect": "node --import tsx scripts/smoke_comfy_collect.mjs",
     "smoke:h3-workflow": "node --import tsx scripts/smoke_h3_workflow.mjs",
     "smoke:h3-profile": "node --import tsx scripts/smoke_h3_profile.mjs",
