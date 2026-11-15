@@ -4,7 +4,7 @@ import { validateH3Workflow, validateH3RefModWorkflow, type ComfyApiWorkflow } f
 export interface H3ReferenceBinding { imageNodeIds?: string[]; audioNodeIds?: string[]; videoNodeIds?: string[]; }
 export interface H3WorkflowProfile {
   schemaVersion: '1.0'; id: string; name: string; graph: ComfyApiWorkflow; graphHash: string;
-  boundary: ReturnType<typeof validateH3Workflow> | ReturnType<typeof validateH3RefModWorkflow>; referenceBindings?: H3ReferenceBinding & { mode?: 'refmod-i2v' | 'fl2va-i2v' };
+  boundary: ReturnType<typeof validateH3Workflow> | ReturnType<typeof validateH3RefModWorkflow>; referenceBindings?: H3ReferenceBinding & { mode?: 'refmod-i2v' | 'i2va-i2v' | 'fl2va-i2v' };
   /** Deterministic quality metadata derived from the immutable graph, used for A/B provenance. */
   qualityHint: 'draft-4step' | 'quality-8step' | 'unknown'; samplingSteps?: number; loras: string[];
   modelStack: Array<{ role: 'diffusion' | 'lora' | 'text-encoder' | 'vae'; nodeClass: string; name: string }>;
@@ -92,11 +92,14 @@ export function createH3WorkflowProfile(id: string, name: string, graph: ComfyAp
   const loras = Object.values(graph).filter((node) => ['LoraLoaderModelOnly','MiniMaxH3PDDAccApply'].includes(node?.class_type ?? ''))
     .map((node) => node.inputs?.lora_name ?? node.inputs?.pdd_file).filter((value): value is string => typeof value === 'string' && value.length > 0);
   const sampling = deriveSampling(graph, loras);
-  const bindings = boundary.mode === 'r2v-2stage-veda' || boundary.mode === 'fl2va-i2v'
+  const bindings = boundary.mode === 'r2v-2stage-veda' || boundary.mode === 'fl2va-i2v' || boundary.mode === 'i2va-i2v'
     ? { ...referenceBindings, imageNodeIds: referenceBindings?.imageNodeIds?.length ? referenceBindings.imageNodeIds : boundary.imageNodeIds }
     : referenceBindings;
   if (bindings) validateReferenceBindings(graph, bindings);
-  if (boundary.mode === 'fl2va-i2v' && (bindings?.imageNodeIds?.length !== 2 || bindings.imageNodeIds.some((id, index) => id !== boundary.imageNodeIds?.[index]))) throw new Error('H3_FL2VA_IMAGE_BINDINGS_MUST_MATCH_FRAME_ORDER');
+  if (boundary.mode === 'fl2va-i2v' || boundary.mode === 'i2va-i2v') {
+    const boundImageIds = bindings?.imageNodeIds;
+    if (!boundImageIds || boundImageIds.length !== boundary.imageNodeIds?.length || boundImageIds.some((id, index) => id !== boundary.imageNodeIds?.[index])) throw new Error('H3_I2V_IMAGE_BINDINGS_MUST_MATCH_FRAME_ORDER');
+  }
   return { schemaVersion:'1.0', id, name, graph: structuredClone(graph), graphHash, boundary, referenceBindings: bindings ? structuredClone({ ...bindings, ...(boundary.mode === 'fl2va-i2v' ? { mode: 'fl2va-i2v' as const } : {}) }) : undefined, modelStack: deriveModelStack(graph), ...sampling };
 }
 
@@ -122,7 +125,7 @@ export function injectH3Inputs(profile: H3WorkflowProfile, input: { prompt: stri
     megapixelsNode.inputs = { ...megapixelsNode.inputs, value: megapixels };
     for (const id of boundary.videoNodeIds ?? []) graph[id].inputs = { ...graph[id].inputs, filename_prefix: `${input.filenamePrefix ?? 'qwendirector/h3'}/${id === boundary.finalVideoNodeId ? 'final' : 'stage1'}` };
   } else {
-    if (boundary.mode === 'fl2va-i2v' && (input.length < 124 || (input.length - 5) % 17 !== 0)) throw new Error('INVALID_FL2VA_H3_LENGTH');
+    if ((boundary.mode === 'fl2va-i2v' || boundary.mode === 'i2va-i2v') && (input.length < 56 || (input.length - 5) % 17 !== 0)) throw new Error('INVALID_H3_I2V_LENGTH');
     const promptBinding = h3.inputs?.prompt;
     if (typeof promptBinding === 'string') {
       h3.inputs = { ...h3.inputs, prompt: input.prompt };
@@ -140,6 +143,7 @@ export function injectH3Inputs(profile: H3WorkflowProfile, input: { prompt: stri
   const imageIds = profile.referenceBindings?.imageNodeIds ?? []; const audioIds = profile.referenceBindings?.audioNodeIds ?? []; const videoIds = profile.referenceBindings?.videoNodeIds ?? [];
   if ((input.images?.length ?? 0) > imageIds.length || (input.audios?.length ?? 0) > audioIds.length || (input.videos?.length ?? 0) > videoIds.length) throw new Error('TOO_MANY_H3_REFERENCES');
   if (boundary.mode === 'fl2va-i2v' && (input.images?.length !== 2 || imageIds.length !== 2)) throw new Error('H3_FL2VA_REQUIRES_FIRST_AND_LAST_IMAGES');
+  if (boundary.mode === 'i2va-i2v' && (input.images?.length !== 1 || imageIds.length !== 1)) throw new Error('H3_I2VA_REQUIRES_ONE_FIRST_FRAME');
   input.images?.forEach((file, index) => { const node = graph[imageIds[index]]; if (!node) throw new Error('INVALID_H3_IMAGE_BINDING'); node.inputs = { ...node.inputs, image: file.subfolder ? `${file.subfolder}/${file.name}` : file.name }; });
   input.audios?.forEach((file, index) => { const node = graph[audioIds[index]]; if (!node) throw new Error('INVALID_H3_AUDIO_BINDING'); node.inputs = { ...node.inputs, audio: file.subfolder ? `${file.subfolder}/${file.name}` : file.name }; });
   input.videos?.forEach((file, index) => { const node = graph[videoIds[index]]; if (!node) throw new Error('INVALID_H3_VIDEO_BINDING'); const field = 'video' in (node.inputs ?? {}) ? 'video' : 'file'; node.inputs = { ...node.inputs, [field]: file.subfolder ? `${file.subfolder}/${file.name}` : file.name }; });

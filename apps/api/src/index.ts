@@ -7,7 +7,7 @@ import { preflightH3Runtime, preflightH3RefModRuntime, validateH3Workflow, valid
 import { planBrief } from '@qwendirector/contracts/planner';
 import { planBriefWithLocalModel } from './local-planner.js';
 import { createWorkbenchPlan, type WorkbenchKind } from '@qwendirector/workflow-adapters/workbenches';
-import { validateWorkbenchGraph, validateWorkbenchRuntimeSchema, WORKBENCH_WORKFLOW_SPECS } from '@qwendirector/workflow-adapters/workbench-catalog';
+import { prepareWorkbenchGraph, validateWorkbenchGraph, validateWorkbenchRuntimeSchema, WORKBENCH_WORKFLOW_SPECS } from '@qwendirector/workflow-adapters/workbench-catalog';
 import { WORKBENCH_CONTRACTS } from '@qwendirector/workflow-adapters/workbenches';
 import { convertComfyUiWorkflowToApi } from '@qwendirector/workflow-adapters/workflow-import';
 import { validateComfyApiWorkflowSchema } from '@qwendirector/workflow-adapters/comfy-schema';
@@ -111,7 +111,7 @@ app.post<{ Body: { workflow: unknown } }>('/v1/workflows/convert', async (reques
 app.get('/v1/workflow-profiles', async (_request, reply) => { if (!('listWorkflowProfiles' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); return { profiles: await (attempts as any).listWorkflowProfiles() }; });
 app.get('/v1/workflow-profiles/catalog', async (_request, reply) => { if (!('listWorkflowProfileCatalog' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); return { profiles: await (attempts as any).listWorkflowProfileCatalog() }; });
 app.get<{ Params:{id:string} }>('/v1/workflow-profiles/:id', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); return profile ?? reply.code(404).send({code:'NOT_FOUND'}); });
-app.post<{ Body: { id:string; name:string; graph:Record<string, any>; referenceBindings?: {mode?:'refmod-i2v'|'fl2va-i2v';imageNodeIds?:string[];audioNodeIds?:string[];videoNodeIds?:string[]} } }>('/v1/workflow-profiles', async (request, reply) => { if (!('saveWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); try { const body=request.body; const profile=body.referenceBindings?.mode === 'refmod-i2v' ? createH3RefModWorkflowProfile(body.id,body.name,body.graph,body.referenceBindings) : createH3WorkflowProfile(body.id,body.name,body.graph,body.referenceBindings); return reply.code(201).send(await (attempts as any).saveWorkflowProfile(profile)); } catch (e) { return reply.code(400).send({code:(e as Error).message}); } });
+app.post<{ Body: { id:string; name:string; graph:Record<string, any>; referenceBindings?: {mode?:'refmod-i2v'|'i2va-i2v'|'fl2va-i2v';imageNodeIds?:string[];audioNodeIds?:string[];videoNodeIds?:string[]} } }>('/v1/workflow-profiles', async (request, reply) => { if (!('saveWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); try { const body=request.body; const profile=body.referenceBindings?.mode === 'refmod-i2v' ? createH3RefModWorkflowProfile(body.id,body.name,body.graph,body.referenceBindings) : createH3WorkflowProfile(body.id,body.name,body.graph,body.referenceBindings); return reply.code(201).send(await (attempts as any).saveWorkflowProfile(profile)); } catch (e) { return reply.code(400).send({code:(e as Error).message}); } });
 app.post<{ Params:{id:string} }>('/v1/workflow-profiles/:id/preflight', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const refmod=profile.reference_bindings?.mode === 'refmod-i2v'; const boundary=refmod ? validateH3RefModWorkflow(profile.graph,profile.reference_bindings) : validateH3Workflow(profile.graph); const runtime=refmod ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188',profile.graph,boundary as ReturnType<typeof validateH3RefModWorkflow>) : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188', profile.graph); return {profileId:profile.id,graphHash:profile.graph_hash,boundary,runtime,revision:profile.revision,active:profile.active === true,tested:true}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
 app.post<{ Params:{id:string} }>('/v1/workflow-profiles/:id/test', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const refmod=profile.reference_bindings?.mode === 'refmod-i2v'; const boundary=refmod ? validateH3RefModWorkflow(profile.graph,profile.reference_bindings) : validateH3Workflow(profile.graph); const runtime=refmod ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188',profile.graph,boundary as ReturnType<typeof validateH3RefModWorkflow>) : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188', profile.graph); return {profileId:profile.id,graphHash:profile.graph_hash,boundary,runtime,revision:profile.revision,active:profile.active === true,tested:true}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
 app.get<{ Params:{id:string} }>('/v1/workflow-profiles/:id/revisions', async (request, reply) => { if (!('listWorkflowProfileRevisions' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); return { profileId:request.params.id, revisions:await (attempts as any).listWorkflowProfileRevisions(request.params.id) }; });
@@ -203,7 +203,7 @@ app.post<{ Body: { project: string; scene: string; shot: string; projectId?:stri
   const planHash = `plan:${shotId}`;
   const requestHash = `request:${shotId}`;
   const idempotencyKey = `director:${shotId}`;
-  if ('jobs' in attempts) { try { const result = await (attempts as any).jobs.createDirector(body); return reply.code(201).send({ ...result, project: body.project, scene: body.scene, shot: body.shot }); } catch (error) { const code = (error as Error).message; return reply.code(code === 'JOB_QUOTA_EXCEEDED' ? 429 : code === 'CATALOG_REFERENCE_NOT_FOUND' ? 404 : code === 'IDEMPOTENCY_CONFLICT' ? 409 : code === 'INVALID_WORKFLOW_PLAN' || code === 'EMPTY_DIRECTOR_PROMPT' || code === 'WORKFLOW_PROFILE_NOT_ACTIVE' || code === 'REFERENCE_ASSET_NOT_FOUND' || code === 'REFERENCE_MIME_MISMATCH' || code === 'INVALID_REFERENCE_PLAN' || code === 'INVALID_REFERENCE_ROLE' || code === 'INCOMPLETE_CATALOG_REFERENCE' || code === 'WORKBENCH_REFERENCE_MEDIA_UNSUPPORTED' || code === 'H3_REFMOD_REFERENCE_MEDIA_UNSUPPORTED' || code === 'IMAGE_EDIT_SAMPLER_MUST_USE_REFERENCE_LATENT' || code.startsWith('H3_WORKFLOW_') || code.startsWith('H3_VEDA_') || code.startsWith('H3_FL2VA_') || code.startsWith('UNSUPPORTED_VEDA_') || code.startsWith('INVALID_VEDA_') || code === 'INVALID_FL2VA_H3_LENGTH' ? 400 : 500).send({ code }); } }
+  if ('jobs' in attempts) { try { const result = await (attempts as any).jobs.createDirector(body); return reply.code(201).send({ ...result, project: body.project, scene: body.scene, shot: body.shot }); } catch (error) { const code = (error as Error).message; return reply.code(code === 'JOB_QUOTA_EXCEEDED' ? 429 : code === 'CATALOG_REFERENCE_NOT_FOUND' ? 404 : code === 'IDEMPOTENCY_CONFLICT' ? 409 : code === 'INVALID_WORKFLOW_PLAN' || code === 'EMPTY_DIRECTOR_PROMPT' || code === 'WORKFLOW_PROFILE_NOT_ACTIVE' || code === 'REFERENCE_ASSET_NOT_FOUND' || code === 'REFERENCE_MIME_MISMATCH' || code === 'INVALID_REFERENCE_PLAN' || code === 'INVALID_REFERENCE_ROLE' || code === 'INCOMPLETE_CATALOG_REFERENCE' || code === 'WORKBENCH_REFERENCE_MEDIA_UNSUPPORTED' || code === 'H3_REFMOD_REFERENCE_MEDIA_UNSUPPORTED' || code === 'IMAGE_EDIT_SAMPLER_MUST_USE_REFERENCE_LATENT' || code.startsWith('H3_WORKFLOW_') || code.startsWith('H3_VEDA_') || code.startsWith('H3_I2VA_') || code.startsWith('H3_FL2VA_') || code.startsWith('UNSUPPORTED_VEDA_') || code.startsWith('INVALID_VEDA_') || code === 'INVALID_FL2VA_H3_LENGTH' || code === 'INVALID_H3_I2V_LENGTH' ? 400 : 500).send({ code }); } }
   const job: Job = { id: randomUUID(), shotId, planHash, requestHash, state: 'awaiting_approval', createdAt: new Date().toISOString() };
   jobs.set(job.id, job);
   return reply.code(201).send({ jobId: job.id, shotId, state: job.state, project: body.project, scene: body.scene, shot: body.shot });
@@ -264,16 +264,18 @@ app.post<{ Body: { kind: WorkbenchKind; graph: Record<string, any>; expectedDige
   try {
     const body = request.body;
     if (!body?.kind || !body.graph) return reply.code(400).send({ code: 'WORKBENCH_GRAPH_REQUIRED' });
-    const validation = validateWorkbenchGraph(body.kind, body.graph, body.expectedDigest, body.outputBindings);
-    return { kind: body.kind, ...validation, accepted: true };
+    const graph = prepareWorkbenchGraph(body.kind, body.graph);
+    const validation = validateWorkbenchGraph(body.kind, graph, body.expectedDigest, body.outputBindings);
+    return { kind: body.kind, graph, ...validation, accepted: true };
   } catch (error) { return reply.code(400).send({ code: (error as Error).message }); }
 });
 app.post<{ Body: { id: string; name: string; kind: WorkbenchKind; graph: Record<string, any>; expectedDigest?: string; outputBindings?: Record<string,string> } }>('/v1/workbenches/profiles', async (request, reply) => {
   if (!('saveWorkbenchProfile' in attempts)) return reply.code(501).send({ code: 'WORKBENCH_PROFILE_STORAGE_UNAVAILABLE' });
   try {
     const body = request.body; if (!body?.id || !body.name || !body.kind || !body.graph) return reply.code(400).send({ code: 'WORKBENCH_PROFILE_REQUIRED' });
-    const validation = validateWorkbenchGraph(body.kind, body.graph, body.expectedDigest, body.outputBindings);
-    return reply.code(201).send(await (attempts as any).saveWorkbenchProfile({ id: body.id, name: body.name, kind: body.kind, graph: body.graph, graphHash: validation.digest, boundary: { classes: validation.classes, outputBindings: validation.outputBindings } }));
+    const graph = prepareWorkbenchGraph(body.kind, body.graph);
+    const validation = validateWorkbenchGraph(body.kind, graph, body.expectedDigest, body.outputBindings);
+    return reply.code(201).send(await (attempts as any).saveWorkbenchProfile({ id: body.id, name: body.name, kind: body.kind, graph, graphHash: validation.digest, boundary: { classes: validation.classes, outputBindings: validation.outputBindings } }));
   } catch (error) { return reply.code(400).send({ code: (error as Error).message }); }
 });
 app.post<{ Params: { id: string } }>('/v1/workbenches/profiles/:id/test', async (request, reply) => {
@@ -295,6 +297,9 @@ app.post<{ Params: { id: string } }>('/v1/workbenches/profiles/:id/activate', as
   try {
     const kind = profile.reference_bindings?.workbenchKind as WorkbenchKind | undefined; if (!kind) throw new Error('WORKBENCH_KIND_MISSING');
     validateWorkbenchGraph(kind, profile.graph, profile.graph_hash, profile.boundary?.outputBindings);
+    const response = await fetch(`${process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188'}/object_info`);
+    if (!response.ok) throw new Error(`COMFY_SCHEMA_${response.status}`);
+    validateWorkbenchRuntimeSchema(profile.graph, await response.json() as Record<string, unknown>);
     const activated = await (attempts as any).activateWorkflowProfile(profile.id); return { profileId: profile.id, kind, active: activated?.active === true, graphHash: profile.graph_hash };
   } catch (error) { return reply.code(409).send({ code: (error as Error).message }); }
 });

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { createH3WorkflowProfile, injectH3Inputs } from '../packages/workflow-adapters/src/h3-profile.ts';
-const profile = createH3WorkflowProfile('h3-official','PVE H3', {'10':{class_type:'MiniMaxH3ReferenceToVideo',inputs:{}},'11':{class_type:'RandomNoise',inputs:{}},'12':{class_type:'SaveVideo',inputs:{}}});
+const profile = createH3WorkflowProfile('h3-official','PVE H3', {'10':{class_type:'MiniMaxH3ReferenceToVideo',inputs:{prompt:'old'}},'11':{class_type:'RandomNoise',inputs:{}},'12':{class_type:'SaveVideo',inputs:{}}});
 const graph = injectH3Inputs(profile,{prompt:'six-section jazz shot',width:1280,height:720,length:56,seed:42,filenamePrefix:'qwendirector/test'});
 assert.equal(graph['10'].inputs.width,1280); assert.equal(graph['10'].inputs.length,56); assert.equal(graph['11'].inputs.noise_seed,42); assert.equal(graph['12'].inputs.filename_prefix,'qwendirector/test'); assert.match(profile.graphHash,/^[a-f0-9]{64}$/); const modelProfile=createH3WorkflowProfile('models','model stack',{'1':{class_type:'UNETLoader',inputs:{unet_name:'minimax_h3_ref2va_pruned_int8_convrot.safetensors'}},'2':{class_type:'LoraLoaderModelOnly',inputs:{lora_name:'pika_h3_flex_ref2va_v1_bf16.safetensors'}},'3':{class_type:'MiniMaxH3ReferenceToVideo',inputs:{}},'4':{class_type:'RandomNoise',inputs:{}},'5':{class_type:'SaveVideo',inputs:{}}}); assert.deepEqual(modelProfile.modelStack,[{role:'diffusion',nodeClass:'UNETLoader',name:'minimax_h3_ref2va_pruned_int8_convrot.safetensors'},{role:'lora',nodeClass:'LoraLoaderModelOnly',name:'pika_h3_flex_ref2va_v1_bf16.safetensors'}]);
-const reordered = createH3WorkflowProfile('h3-official','PVE H3', {'12':{inputs:{},class_type:'SaveVideo'},'11':{inputs:{},class_type:'RandomNoise'},'10':{inputs:{},class_type:'MiniMaxH3ReferenceToVideo'}});
+const reordered = createH3WorkflowProfile('h3-official','PVE H3', {'12':{inputs:{},class_type:'SaveVideo'},'11':{inputs:{},class_type:'RandomNoise'},'10':{inputs:{prompt:'old'},class_type:'MiniMaxH3ReferenceToVideo'}});
 assert.equal(reordered.graphHash, profile.graphHash);
 const qualityGraph = {
   '10': { class_type: 'MiniMaxH3ReferenceToVideo', inputs: {} },
@@ -30,4 +30,10 @@ fullStepsGraph['23'].inputs.value = false;
 const fullStepsProfile = createH3WorkflowProfile('h3-quality-full-steps', 'H3 full steps', fullStepsGraph);
 assert.equal(fullStepsProfile.samplingSteps, 56);
 assert.equal(fullStepsProfile.qualityHint, 'unknown');
-assert.throws(() => injectH3Inputs(profile,{prompt:'',width:1280,height:720,length:56}),/INVALID_H3_INPUTS/); console.log('OK: immutable H3 profile snapshot and deterministic input injection');
+assert.throws(() => injectH3Inputs(profile,{prompt:'',width:1280,height:720,length:56}),/INVALID_H3_INPUTS/);
+const i2vaProfile=createH3WorkflowProfile('i2va','H3 I2VA',{'1':{class_type:'MiniMaxH3ImageToVideo',inputs:{first_frame:['4',0],prompt:'old'}},'2':{class_type:'RandomNoise',inputs:{}},'3':{class_type:'SaveVideo',inputs:{}},'4':{class_type:'LoadImage',inputs:{image:'old.png'}}});
+assert.equal(i2vaProfile.boundary.mode,'i2va-i2v'); assert.deepEqual(i2vaProfile.referenceBindings.imageNodeIds,['4']);
+const i2vaGraph=injectH3Inputs(i2vaProfile,{prompt:'integrated multimodal prompt',width:1344,height:768,length:124,images:[{name:'key.png',subfolder:'input'}]});
+assert.equal(i2vaGraph['1'].inputs.first_frame[0],'4'); assert.equal(i2vaGraph['4'].inputs.image,'input/key.png'); assert.equal(i2vaGraph['1'].inputs.prompt,'integrated multimodal prompt');
+assert.throws(()=>injectH3Inputs(i2vaProfile,{prompt:'x',width:1344,height:768,length:124,images:[{name:'a.png'},{name:'b.png'}]}),/TOO_MANY_H3_REFERENCES/);
+console.log('OK: immutable H3 profile snapshot and deterministic input injection');

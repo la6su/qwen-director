@@ -26,6 +26,34 @@ export function digestWorkflow(graph: unknown): string {
 
 export function validateWorkbenchRuntimeSchema(graph: Record<string, any>, schema: Record<string, any>) { return validateComfyApiWorkflowSchema(graph, schema, 'WORKBENCH_RUNTIME_SCHEMA_MISMATCH'); }
 
+/** Resolve the explicit edit path for the Qwen Image edit workbench. Saved
+ * template graphs may default to an empty latent even though their reference
+ * encoder exposes the source-image latent on the alternate switch branch.
+ */
+export function prepareWorkbenchGraph(kind: WorkbenchKind, source: Record<string, any>): Record<string, any> {
+  if (kind !== 'image-edit') return source;
+  const graph = structuredClone(source);
+  const samplers = Object.entries(graph).filter(([, node]) => node?.class_type === 'KSampler');
+  const encoders = Object.entries(graph).filter(([, node]) => node?.class_type === 'TextEncodeQwenImage21');
+  if (samplers.length !== 1 || encoders.length !== 1) return graph;
+  const [encoderId] = encoders[0];
+  const sampler = samplers[0][1] as any;
+  const directSource = linkedSource(graph, sampler.inputs?.latent_image);
+  if (directSource?.[0] === encoderId && directSource[1] === 2) return graph;
+  const latentLink = sampler.inputs?.latent_image;
+  const switchNode = Array.isArray(latentLink) && typeof latentLink[0] === 'string' ? graph[latentLink[0]] : undefined;
+  if (switchNode?.class_type !== 'ComfySwitchNode' || typeof switchNode.inputs?.switch !== 'boolean') throw new Error('IMAGE_EDIT_REFERENCE_LATENT_SWITCH_REQUIRED');
+  const trueSource = linkedSource(graph, switchNode.inputs?.on_true);
+  const falseSource = linkedSource(graph, switchNode.inputs?.on_false);
+  const trueIsEdit = trueSource?.[0] === encoderId && trueSource[1] === 2;
+  const falseIsEdit = falseSource?.[0] === encoderId && falseSource[1] === 2;
+  if (trueIsEdit === falseIsEdit) throw new Error('IMAGE_EDIT_REFERENCE_LATENT_SWITCH_AMBIGUOUS');
+  const inactiveSource = trueIsEdit ? falseSource : trueSource;
+  if (!inactiveSource || graph[inactiveSource[0]]?.class_type !== 'EmptyLatentImage') throw new Error('IMAGE_EDIT_EMPTY_LATENT_BRANCH_REQUIRED');
+  switchNode.inputs = { ...switchNode.inputs, switch: trueIsEdit };
+  return graph;
+}
+
 export function resolveWorkbenchOutputBindings(kind: WorkbenchKind, graph: Record<string, any>, bindings?: Record<string, string>) {
   if (kind === 'refmod-create') return {};
   const contract = getWorkbenchContract(kind);
@@ -79,8 +107,8 @@ export function validateWorkbenchGraph(kind: WorkbenchKind, graph: Record<string
     if (!latentSource || latentSource[1] !== 2 || latentSource[0] !== encoderId) throw new Error('IMAGE_EDIT_SAMPLER_MUST_USE_REFERENCE_LATENT');
 
     const resolution = encoder.inputs?.resolution;
-    if (!Number.isInteger(resolution) || resolution <= 0) throw new Error('IMAGE_EDIT_REFERENCE_RESOLUTION_REQUIRED');
-    if (resolution % 32 !== 0) throw new Error('IMAGE_EDIT_REFERENCE_RESOLUTION_MUST_ALIGN_32');
+    if (!Number.isInteger(resolution) || resolution < 0) throw new Error('IMAGE_EDIT_REFERENCE_RESOLUTION_INVALID');
+    if (resolution > 0 && resolution % 32 !== 0) throw new Error('IMAGE_EDIT_REFERENCE_RESOLUTION_MUST_ALIGN_32');
 
     const enhancers = Object.entries(graph).filter(([, node]) => node?.class_type === 'TextGenerate');
     if (enhancers.length) {

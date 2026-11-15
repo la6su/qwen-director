@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { alignMiniMaxH3Frames, isMiniMaxH3TrainedLength, miniMaxH3DurationSeconds } from '../packages/contracts/src/cinematic.ts';
-import { compileDirectorPrompt, compileH3Ref2VAPrompt } from '../packages/contracts/src/prompt.ts';
+import { compileDirectorPrompt, compileH3BasePrompt, compileH3Ref2VAPrompt } from '../packages/contracts/src/prompt.ts';
 
 for (const frames of [56, 73, 124, 192, 243, 362]) assert.equal(alignMiniMaxH3Frames(frames), frames);
 assert.equal(alignMiniMaxH3Frames(120), 124);
@@ -28,4 +28,10 @@ assert.ok(prompt.includes('non_diegetic_music:\nN/A'));
 assert.ok(!prompt.includes('undefined'));
 
 assert.equal(compileDirectorPrompt({ prompt:'A quiet room', music:'N/A' }), 'A quiet room\nNon-diegetic music: N/A');
+const i2va = compileH3BasePrompt({ prompt:'A lone creator edits an image.', camera:'The camera holds a static shot.', sound:'Quiet room tone.', music:'N/A' }, { mode:'i2va' });
+assert.ok(i2va.startsWith('For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\nintegrated_multimodal_description: [Shot 1]'));
+for (const section of ['overall_soundscape: Quiet room tone.','non_diegetic_music: N/A']) assert.ok(i2va.includes(section));
+const fl2va = compileH3BasePrompt({ prompt:'A continuous physical camera move.', sound:'Room tone.' }, { mode:'fl2va', frameCount:124, finalShotNumber:2 });
+assert.ok(fl2va.startsWith('How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 2) aligns with the 5.17-second mark of the target video.\n\nintegrated_multimodal_description:'));
+assert.throws(() => compileH3BasePrompt({ prompt:'A shot.' }, { mode:'fl2va', frameCount:120 }), /INVALID_FL2VA_H3_LENGTH/);
 console.log('smoke_cinematic_contract: OK');

@@ -45,7 +45,7 @@ export function convertComfyUiWorkflowToApi(value: unknown, schema: Record<strin
   };
   const api: Record<string, any> = {};
   for (const node of workflow.nodes) {
-    if (node.mode === 2 || node.type === 'Note' || node.type === 'MarkdownNote' || node.type === 'SetNode' || node.type === 'GetNode') continue;
+    if (node.mode === 2 || node.type === 'Note' || node.type === 'MarkdownNote' || node.type === 'ImageCompare' || node.type === 'SetNode' || node.type === 'GetNode') continue;
     if (node.mode && node.mode !== 4) throw new Error(`WORKFLOW_NODE_MODE_UNSUPPORTED:${node.id}:${node.mode}`);
     if (node.mode === 4) continue;
     if (!schema[node.type]) throw new Error(`WORKFLOW_NODE_CLASS_UNKNOWN:${node.id}:${node.type}`);
@@ -120,7 +120,7 @@ export function convertComfyUiWorkflowToApi(value: unknown, schema: Record<strin
   for (const [id, node] of Object.entries(api)) if (schema[node.class_type]?.output_node) visit(id);
   for (const id of Object.keys(api)) if (!needed.has(id)) delete api[id];
   for (const node of workflow.nodes) {
-    if (!schema[node.type] || node.mode === 2 || node.mode === 4 || ['Note','MarkdownNote','SetNode','GetNode','Reroute'].includes(node.type)) continue;
+    if (!schema[node.type] || node.mode === 2 || node.mode === 4 || ['Note','MarkdownNote','ImageCompare','SetNode','GetNode','Reroute'].includes(node.type)) continue;
     for (const socket of node.inputs ?? []) if (socket.link) {
       const apiNode = api[String(node.id)]; if (!apiNode || !(socket.name in apiNode.inputs)) continue;
       const link = apiNode.inputs[socket.name]; if (Array.isArray(link) && !api[link[0]]) throw new Error(`WORKFLOW_LINK_SOURCE_NOT_EXECUTABLE:${node.id}:${socket.name}`);

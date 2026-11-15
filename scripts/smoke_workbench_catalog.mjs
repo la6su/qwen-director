@@ -1,4 +1,4 @@
-import { digestWorkflow, validateWorkbenchGraph, validateWorkbenchRuntimeSchema, WORKBENCH_WORKFLOW_SPECS } from '@qwendirector/workflow-adapters/workbench-catalog';
+import { digestWorkflow, prepareWorkbenchGraph, validateWorkbenchGraph, validateWorkbenchRuntimeSchema, WORKBENCH_WORKFLOW_SPECS } from '@qwendirector/workflow-adapters/workbench-catalog';
 const graph = { '1': { class_type: 'LoadImage', inputs: {} }, '2': { class_type: 'SaveImage', inputs: {} } };
 const digest = digestWorkflow(graph);
 for (const kind of ['actor','scene','prop','layout']) {
@@ -12,6 +12,18 @@ try { validateWorkbenchGraph('actor', multiOutputGraph); throw new Error('expect
 if (validateWorkbenchGraph('actor', multiOutputGraph, undefined, { '2': 'turnaround', '3': 'master' }).outputBindings['2'] !== 'turnaround') throw new Error('explicit saver slot mapping mismatch');
 try { validateWorkbenchGraph('actor', multiOutputGraph, undefined, { '2': 'master', '3': 'master' }); throw new Error('expected duplicate slot rejection'); } catch (error) { if ((error.message ?? '') !== 'WORKBENCH_OUTPUT_BINDINGS_INVALID') throw error; }
 console.log('workbench catalog smoke: ok');
+const imageEditGraph = {
+  '1': { class_type:'LoadImage', inputs:{ image:'base.png' } },
+  '2': { class_type:'TextEncodeQwenImage21', inputs:{ resolution:0, 'images.image_1':['1',0] } },
+  '3': { class_type:'EmptyLatentImage', inputs:{ width:1659, height:948, batch_size:1 } },
+  '4': { class_type:'ComfySwitchNode', inputs:{ switch:true, on_true:['3',0], on_false:['2',2] } },
+  '5': { class_type:'KSampler', inputs:{ latent_image:['4',0] } },
+  '6': { class_type:'SaveImageAdvanced', inputs:{ images:['5',0] } },
+};
+const preparedImageEdit = prepareWorkbenchGraph('image-edit', imageEditGraph);
+if (preparedImageEdit['4'].inputs.switch !== false || imageEditGraph['4'].inputs.switch !== true) throw new Error('image edit must select an immutable copy of the reference latent branch');
+validateWorkbenchGraph('image-edit', preparedImageEdit);
+console.log('workbench Qwen edit branch smoke: ok');
 const runtime = validateWorkbenchRuntimeSchema({ '1': { class_type: 'LoadImage', inputs: { image: 'fixture.png' } }, '2': { class_type: 'SaveImage', inputs: { filename_prefix: 'fixture' } } }, { LoadImage: { input: { required: { image: ['STRING', {}] } } }, SaveImage: { input: { required: { filename_prefix: ['STRING', {}] } } } });
 if (runtime.nodes !== 2) throw new Error('runtime node count mismatch');
 for (const [candidate, schema, expected] of [

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { compileDirectorPrompt, compileH3Fl2VAPrompt, compileH3Ref2VAPrompt, compileQwenImageEditPrompt, getDirectorPromptCompleteness, type DirectorPromptFields } from '@qwendirector/contracts/prompt';
+import { compileDirectorPrompt, compileH3BasePrompt, compileH3Fl2VAPrompt, compileH3Ref2VAPrompt, compileQwenImageEditPrompt, getDirectorPromptCompleteness, type DirectorPromptFields } from '@qwendirector/contracts/prompt';
 import { createH3WorkflowProfile, createH3RefModWorkflowProfile } from '@qwendirector/workflow-adapters/h3-profile';
-import { validateWorkbenchGraph } from '@qwendirector/workflow-adapters/workbench-catalog';
+import { prepareWorkbenchGraph, validateWorkbenchGraph } from '@qwendirector/workflow-adapters/workbench-catalog';
 import type { WorkbenchKind } from '@qwendirector/workflow-adapters/workbenches';
 
 function canonicalJson(value: unknown): string {
@@ -68,6 +68,7 @@ export class PgJobRepository {
         if (!source) throw new Error('INVALID_WORKFLOW_PLAN');
         const workbenchKind = body.workflowReferenceBindings?.workbenchKind;
         if (workbenchKind && ['actor','scene','prop','layout','image-edit','image-generate','refmod-create'].includes(workbenchKind)) {
+          source = prepareWorkbenchGraph(workbenchKind as WorkbenchKind, source);
           const validation = validateWorkbenchGraph(workbenchKind as WorkbenchKind, source, undefined, body.workflowReferenceBindings?.outputBindings);
           workflowProfile = { schemaVersion: '1.0', id: body.workflowProfileId ?? `${workbenchKind}-custom`, name: body.workflowProfileName ?? `${workbenchKind} workbench`, graph: source, graphHash: createHash('sha256').update(canonicalJson(source)).digest('hex'), boundary: { workbenchKind, outputBindings: validation.outputBindings }, referenceBindings: body.workflowReferenceBindings, qualityHint: 'unknown', loras: [] };
         } else workflowProfile = body.workflowReferenceBindings?.mode === 'refmod-i2v'
@@ -96,17 +97,22 @@ export class PgJobRepository {
         const frames = references.filter((reference: any) => reference.type === 'image');
         if (references.length !== 2 || frames.length !== 2 || frames.filter((reference: any) => reference.role === 'first-frame').length !== 1 || frames.filter((reference: any) => reference.role === 'last-frame').length !== 1) throw new Error('H3_FL2VA_FIRST_AND_LAST_FRAME_REFERENCES_REQUIRED');
       }
+      if (workflowProfile && !('workbenchKind' in workflowProfile.boundary) && workflowProfile.boundary.mode === 'i2va-i2v') {
+        const frames = references.filter((reference: any) => reference.type === 'image');
+        if (frames.length !== 1 || frames[0].role !== 'first-frame') throw new Error('H3_I2VA_FIRST_FRAME_REFERENCE_REQUIRED');
+      }
       if (workflowProfile && !('workbenchKind' in workflowProfile.boundary)) {
         const bindings = workflowProfile.referenceBindings ?? {};
         if (references.filter((reference:any) => reference.type === 'audio').length > (bindings.audioNodeIds?.length ?? 0)) throw new Error('H3_WORKFLOW_AUDIO_BINDINGS_REQUIRED');
         if (references.filter((reference:any) => reference.type === 'video').length > ((bindings as any).videoNodeIds?.length ?? 0)) throw new Error('H3_WORKFLOW_VIDEO_BINDINGS_REQUIRED');
       }
       const boundaryMode = workflowProfile && !('workbenchKind' in workflowProfile.boundary) ? workflowProfile.boundary.mode : undefined;
-      const planLength = boundaryMode === 'fl2va-i2v' ? Number(body.length ?? 124) : body.length;
+      const planLength = boundaryMode === 'fl2va-i2v' || boundaryMode === 'i2va-i2v' ? Number(body.length ?? 124) : body.length;
       const workbenchKind = workflowProfile && 'workbenchKind' in workflowProfile.boundary ? workflowProfile.boundary.workbenchKind : undefined;
       const compiledPrompt = workbenchKind
         ? workbenchKind === 'image-edit' ? compileQwenImageEditPrompt(body, references) : compileDirectorPrompt(body)
         : boundaryMode === 'fl2va-i2v' ? compileH3Fl2VAPrompt(body, Number(planLength))
+          : boundaryMode === 'i2va-i2v' ? compileH3BasePrompt(body, { mode: 'i2va' })
           : boundaryMode === undefined || boundaryMode === 'r2v-2stage-veda' ? compileH3Ref2VAPrompt(body, references)
             : compileDirectorPrompt(body);
       const plan = { project: body.project, scene: body.scene, shot: body.shot, catalog: { projectId, sceneId, shotId }, prompt: compiledPrompt, promptCompleteness, width: body.width, height: body.height, length: planLength, seed: body.seed, directorFields: { ...body, references }, references, workflowProfile };

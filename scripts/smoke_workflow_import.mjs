@@ -39,4 +39,14 @@ assert.equal(aliases['4'].inputs.text[0], '1');
 assert.equal(Object.hasOwn(aliases, '2'), false);
 assert.equal(Object.hasOwn(aliases, '3'), false);
 assert.equal(Object.hasOwn(aliases, '5'), false);
+const withoutViewer = convertComfyUiWorkflowToApi({ nodes: [
+  { id: 10, type:'SourceImage', inputs:[{name:'image',widget:{name:'image'},link:null}], outputs:[{type:'IMAGE'}], widgets_values:['base.png'] },
+  { id: 11, type:'ImageCompare', inputs:[{name:'image_a',link:30},{name:'compare_view',widget:{name:'compare_view'},link:null}], outputs:[], widgets_values:[], mode:0 },
+  { id: 12, type:'ImageSaver', inputs:[{name:'images',link:31}], outputs:[] },
+], links:[[30,10,0,11,0,'IMAGE'],[31,10,0,12,0,'IMAGE']] }, {
+  SourceImage:{output:['IMAGE'],input_order:{required:['image']},input:{required:{image:['STRING',{}]}}},
+  ImageCompare:{output_node:true,output:['IMAGE'],input:{required:{image_a:['IMAGE',{}],compare_view:['IMAGECOMPARE',{}]}}},
+  ImageSaver:{output_node:true,output:[],input:{required:{images:['IMAGE',{}]}}},
+});
+assert.equal(Object.values(withoutViewer).some((node) => node.class_type === 'ImageCompare'), false);
 console.log('OK: ComfyUI API workflow and QD artifact import normalization');

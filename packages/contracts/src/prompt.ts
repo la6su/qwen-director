@@ -95,9 +95,41 @@ export function compileH3Ref2VAPrompt(fields: DirectorPromptFields, references: 
   ].join('\n\n');
 }
 
+export type H3BaseMode = 't2va' | 'i2va' | 'fl2va' | 'l2va';
+
+/** Compile the three shared multimodal fields used by H3 base video modes. */
+export function compileH3BasePrompt(fields: DirectorPromptFields, options: { mode: H3BaseMode; frameCount?: number; finalShotNumber?: number }): string {
+  const { mode } = options;
+  const frameCount = options.frameCount ?? 124;
+  if ((mode === 'fl2va' || mode === 'l2va') && (!Number.isInteger(frameCount) || frameCount < 56 || (frameCount - 5) % 17 !== 0)) throw new Error(mode === 'fl2va' ? 'INVALID_FL2VA_H3_LENGTH' : 'INVALID_L2VA_H3_LENGTH');
+  const shotNumber = options.finalShotNumber ?? 1;
+  if (!Number.isInteger(shotNumber) || shotNumber < 1) throw new Error('INVALID_H3_SHOT_NUMBER');
+
+  let alignment = '';
+  if (mode === 'i2va') alignment = 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.';
+  else if (mode === 'fl2va') alignment = `How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot ${shotNumber}) aligns with the ${(frameCount / 24).toFixed(2)}-second mark of the target video.`;
+  else if (mode === 'l2va') alignment = `How the reference pictures align with the target video — <Picture 1> (from [Shot ${shotNumber}]) aligns with the ${(frameCount / 24).toFixed(2)}-second mark of the target video.`;
+
+  const visual = [
+    fields.prompt?.trim(),
+    fields.composition?.trim() && `Composition: ${fields.composition.trim()}`,
+    fields.lighting?.trim() && `Lighting: ${fields.lighting.trim()}`,
+    fields.action?.trim() && `Action: ${fields.action.trim()}`,
+    fields.camera?.trim() && `Camera: ${fields.camera.trim()}`,
+    fields.transition?.trim() && `Transition: ${fields.transition.trim()}`,
+  ].filter((value): value is string => Boolean(value));
+  if (!visual.length) throw new Error('EMPTY_DIRECTOR_PROMPT');
+  const description = visual.join(' ');
+  const shotDescription = /^\[Shot\s+1\]/i.test(description) ? description : `[Shot 1] ${description}`;
+  const body = [
+    `integrated_multimodal_description: ${shotDescription}`,
+    `overall_soundscape: ${fields.sound?.trim() || 'Natural location ambience and action-linked Foley only. No speech or vocalization is heard.'}`,
+    `non_diegetic_music: ${fields.music?.trim() || 'N/A'}`,
+  ].join('\n');
+  return alignment ? `${alignment}\n\n${body}` : body;
+}
+
 /** Compile a two-keyframe H3 prompt with explicit FL2VA timestamp alignment. */
 export function compileH3Fl2VAPrompt(fields: DirectorPromptFields, frameCount: number): string {
-  if (!Number.isInteger(frameCount) || frameCount < 124 || (frameCount - 5) % 17 !== 0) throw new Error('INVALID_FL2VA_H3_LENGTH');
-  const duration = (frameCount / 24).toFixed(2);
-  return `How the reference pictures align with the target video - Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the ${duration}-second mark of the target video.\n\n${compileDirectorPrompt(fields)}`;
+  return compileH3BasePrompt(fields, { mode: 'fl2va', frameCount });
 }

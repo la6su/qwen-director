@@ -93,7 +93,7 @@
     "smoke:shot-prompt": "node --import tsx scripts/smoke_shot_prompt.mjs",
     "smoke:workbench-executor": "node --import tsx scripts/smoke_workbench_executor.mjs",
     "smoke:workbench-catalog": "node --import tsx scripts/smoke_workbench_catalog.mjs",
-    "smoke:workbench-validate-api": "node scripts/smoke_workbench_validate_api.mjs",
+    "smoke:workbench-validate-api": "node --import tsx scripts/smoke_workbench_validate_api.mjs",
     "smoke:generic-job-plan": "node scripts/smoke_generic_job_plan.mjs",
     "smoke:workbench-executor-e2e": "node --import tsx scripts/smoke_workbench_executor_e2e.mjs",
     "smoke:workbench-prompt": "node --import tsx scripts/smoke_workbench_prompt.mjs",

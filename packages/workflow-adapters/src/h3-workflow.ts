@@ -1,7 +1,7 @@
 import { validateComfyApiWorkflowSchema } from './comfy-schema.js';
 
 export type ComfyApiWorkflow = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
-export type H3WorkflowBoundary = { h3NodeId: string; noiseNodeId: string; saveNodeId: string; mode?: 'r2v-2stage-veda' | 'fl2va-i2v'; noiseNodeIds?: string[]; videoNodeIds?: string[]; finalVideoNodeId?: string; promptNodeId?: string; durationNodeId?: string; resolutionNodeId?: string; megapixelsNodeId?: string; imageNodeIds?: string[] };
+export type H3WorkflowBoundary = { h3NodeId: string; noiseNodeId: string; saveNodeId: string; mode?: 'r2v-2stage-veda' | 'i2va-i2v' | 'fl2va-i2v'; noiseNodeIds?: string[]; videoNodeIds?: string[]; finalVideoNodeId?: string; promptNodeId?: string; durationNodeId?: string; resolutionNodeId?: string; megapixelsNodeId?: string; imageNodeIds?: string[] };
 
 const linkedNodeId = (value: unknown) => Array.isArray(value) && typeof value[0] === 'string' ? value[0] : undefined;
 function isUpstream(graph: ComfyApiWorkflow, from: string, target: string, seen = new Set<string>()): boolean {
@@ -74,14 +74,15 @@ export function validateH3Workflow(workflow: ComfyApiWorkflow): H3WorkflowBounda
   if (save.length !== 1) throw new Error(`H3_WORKFLOW_REQUIRES_ONE_SAVE_NODE:${save.length}`);
   if (i2va.length) {
     const h3Node = i2va[0][1];
-    const frameLinks = ['first_frame', 'last_frame'].map((field) => {
-      const source = linkedNodeId(h3Node.inputs?.[field]);
-      if (!source || workflow[source]?.class_type !== 'LoadImage') throw new Error(`H3_FL2VA_${field.toUpperCase()}_BINDING_REQUIRED`);
-      return source;
-    });
-    if (new Set(frameLinks).size !== 2) throw new Error('H3_FL2VA_DISTINCT_FRAMES_REQUIRED');
+    const firstFrame = linkedNodeId(h3Node.inputs?.first_frame);
+    const lastFrame = linkedNodeId(h3Node.inputs?.last_frame);
+    if (!firstFrame || workflow[firstFrame]?.class_type !== 'LoadImage') throw new Error('H3_I2VA_FIRST_FRAME_BINDING_REQUIRED');
+    if (lastFrame && workflow[lastFrame]?.class_type !== 'LoadImage') throw new Error('H3_FL2VA_LAST_FRAME_BINDING_INVALID');
+    if (lastFrame === firstFrame) throw new Error('H3_FL2VA_DISTINCT_FRAMES_REQUIRED');
     if (find('MiniMaxH3RefModsLoader').length || find('MiniMaxH3RefModApply').length) throw new Error('H3_FL2VA_REFMOD_GRAPH_UNSUPPORTED');
-    return { mode: 'fl2va-i2v', h3NodeId: i2va[0][0], noiseNodeId: noise[0][0], saveNodeId: save[0][0], imageNodeIds: frameLinks };
+    return lastFrame
+      ? { mode: 'fl2va-i2v', h3NodeId: i2va[0][0], noiseNodeId: noise[0][0], saveNodeId: save[0][0], imageNodeIds: [firstFrame, lastFrame] }
+      : { mode: 'i2va-i2v', h3NodeId: i2va[0][0], noiseNodeId: noise[0][0], saveNodeId: save[0][0], imageNodeIds: [firstFrame] };
   }
   if (find('ref_frame').length || find('last_frame').length) throw new Error('H3_WORKFLOW_UNSUPPORTED_I2V_BOUNDARY');
   return { h3NodeId: ref2va[0][0], noiseNodeId: noise[0][0], saveNodeId: save[0][0] };
