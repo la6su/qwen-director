@@ -1,9 +1,10 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
-process.env.QWEN_STORAGE='postgres'; process.env.DATABASE_URL='postgresql:///qwendirector'; process.env.QWEN_API_AUTOSTART='false';
+process.env.QWEN_STORAGE='postgres'; process.env.QWEN_API_AUTOSTART='false';
 const { app } = await import('../apps/api/src/index.ts');
-const pool = new pg.Pool({ host:'/var/run/postgresql', database:'qwendirector' });
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const parent = randomUUID(), child = randomUUID();
 try {
   await pool.query(`insert into asset_versions(id,sha256,byte_size,mime_type,storage_key,provenance,asset_kind,tags) values

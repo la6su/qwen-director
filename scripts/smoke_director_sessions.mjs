@@ -1,3 +1,4 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 

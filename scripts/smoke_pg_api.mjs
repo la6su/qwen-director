@@ -1,11 +1,11 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import pg from 'pg';
 process.env.QWEN_STORAGE='postgres';
-process.env.DATABASE_URL='postgresql:///qwendirector';
 process.env.QWEN_API_AUTOSTART='false';
 const {app}=await import('../apps/api/src/index.ts');
-const pool=new pg.Pool({host:'/var/run/postgresql',database:'qwendirector'});
+const pool=new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const [project,scene,shot,node]=Array.from({length:4},()=>randomUUID());
 try {
   await pool.query('insert into projects(id,name) values($1,$2)',[project,'API integration smoke']);

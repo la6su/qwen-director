@@ -1,9 +1,9 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-process.env.QWEN_STORAGE='postgres'; process.env.QWEN_API_AUTOSTART='false'; process.env.DATABASE_URL ??= 'postgresql:///qwendirector';
-const { app } = await import('../apps/api/src/index.ts');
-const pool = new pg.Pool({host:'/var/run/postgresql',user:process.env.PGUSER ?? 'la6',database:'qwendirector'});
+process.env.QWEN_STORAGE='postgres'; process.env.QWEN_API_AUTOSTART='false'; const { app } = await import('../apps/api/src/index.ts');
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const projectResponse = await app.inject({method:'POST',url:'/v1/projects',payload:{name:`mutation-${randomUUID()}`} });
 assert.equal(projectResponse.statusCode,201); const project = projectResponse.json();
 let scene;

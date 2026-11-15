@@ -1,10 +1,11 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import pg from 'pg';
-process.env.QWEN_STORAGE='postgres'; process.env.DATABASE_URL='postgresql:///qwendirector'; process.env.QWEN_API_AUTOSTART='false';
+process.env.QWEN_STORAGE='postgres'; process.env.QWEN_API_AUTOSTART='false';
 const databaseUrl = new URL('postgresql://127.0.0.1'); databaseUrl.port = process.env.POSTGRES_PORT ?? '5432'; databaseUrl.pathname = `/${process.env.POSTGRES_DB ?? 'qwendirector'}`; if (process.env.POSTGRES_USER) databaseUrl.username = process.env.POSTGRES_USER; if (process.env.POSTGRES_PASSWORD) databaseUrl.password = process.env.POSTGRES_PASSWORD; process.env.DATABASE_URL = databaseUrl.toString();
 const root = await mkdtemp(join(tmpdir(), 'qwendirector-e2e-')); process.env.QWEN_ASSET_ROOT = root;
 const { app } = await import('../apps/api/src/index.ts'); const { execute } = await import('../apps/worker/src/executor.ts'); const { HttpExecutionHooks } = await import('../apps/worker/src/http-hooks.ts');

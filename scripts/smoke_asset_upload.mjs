@@ -1,9 +1,10 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import pg from 'pg';
-process.env.QWEN_STORAGE='postgres'; process.env.DATABASE_URL='postgresql:///qwendirector'; process.env.QWEN_API_AUTOSTART='false';
+process.env.QWEN_STORAGE='postgres'; process.env.QWEN_API_AUTOSTART='false';
 const { app } = await import('../apps/api/src/index.ts');
-const pool = new pg.Pool({ host:'/var/run/postgresql', database:'qwendirector' });
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const [project, scene, shot, job, node] = Array.from({length:5}, randomUUID);
 const bytes = Buffer.from('asset-upload-smoke'); const sha256 = createHash('sha256').update(bytes).digest('hex');
 try {

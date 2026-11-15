@@ -1,9 +1,10 @@
+import './lib/test-database.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { PgAttemptRepository } from '../apps/api/src/pg-repository.ts';
 
-const pool = process.env.DATABASE_URL ? new pg.Pool({ connectionString: process.env.DATABASE_URL }) : new pg.Pool({ host: '/var/run/postgresql', user: 'la6', database: 'qwendirector' });
+const pool = process.env.DATABASE_URL ? new pg.Pool({ connectionString: process.env.DATABASE_URL }) : new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
 const [project, scene, shot, job, incompatible, compatible, shot2, job2] = ids;
 try {
