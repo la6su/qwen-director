@@ -1,0 +1,44 @@
+{
+  "1": {
+    "class_type": "H3RefModCreateFromFolder",
+    "inputs": {
+      "vae": [
+        "2",
+        0
+      ],
+      "folder": "",
+      "use_subfolders": false,
+      "use_folder_as_name": false,
+      "name": "qwendirector_refmod_candidate",
+      "extraction_preset": "identity_encode",
+      "advanced": false,
+      "concept_type": "identity",
+      "audio_concept_type": "voice",
+      "mode": "Full Reference",
+      "ref_resolution": 1024,
+      "pool_h": 16,
+      "pool_w": 16,
+      "max_tokens": 8192,
+      "identity": 0,
+      "merge": false,
+      "multiplier": 1,
+      "background_retention": 0,
+      "audio_max_seconds": 30,
+      "audio_max_tokens": 5120,
+      "audio_budget_policy": "error",
+      "max_total_tokens": 0,
+      "budget_policy": "truncate",
+      "description": "Identity RefMod built from one face anchor and headless front/back wardrobe references.",
+      "save": true,
+      "save_layout": "bundle",
+      "include_images": true,
+      "subfolder": "QwenDirector"
+    }
+  },
+  "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  }
+}

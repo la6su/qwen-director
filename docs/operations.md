@@ -2,9 +2,11 @@
 
 ## Текущий статус
 
-Текущий локальный контур уже работает на PostgreSQL: API, worker, filesystem CAS, runtime/readiness checks и ComfyUI MiniMax H3 E2E подтверждены. Инвентаризация ниже остаётся источником эксплуатационных фактов и должна обновляться при смене узлов; Proxmox-кластеры и часть аппаратной топологии — исходные сведения пользователя, а не автоматически подтверждённый inventory.
+Локальный контур подтверждал PostgreSQL API/worker, filesystem CAS, runtime checks и ComfyUI MiniMax H3 E2E. Live-срез 2026-11-15: API `127.0.0.1:4310`, PostgreSQL и ComfyUI `127.0.0.1:8188` доступны; worker online, Comfy queue пуста. Planner endpoint недоступен и не запускается; это даёт `degraded: true`, но не блокирует generation readiness. Proxmox-кластеры и часть аппаратной топологии остаются сведениями пользователя, а не автоматически подтверждённым inventory.
 
-Подтверждённые локальные endpoints: API `127.0.0.1:4310`, llama.cpp `127.0.0.1:8081`, ComfyUI/PVE `192.168.10.165:8188`. Последний runtime check показал ComfyUI H3 capabilities и успешную persistence-проверку. Backup/verify и CAS GC пока выполняются операционными командами вручную.
+Локальные API и ComfyUI endpoints настраиваются через переменные окружения. Planner остаётся необязательным для image/video generation. Конкретные пути установки, адреса узлов, GPU inventory и состояние очереди относятся к локальному окружению и в публичной документации не фиксируются. Backup/verify и CAS GC пока выполняются операционными командами вручную.
+
+`/ready` означает, что доступен production generation path: ComfyUI и storage. Ответ включает `checks[].required`; недоступный `llama.cpp`/planner остаётся видимым как optional degradation (`degraded: true`), но не блокирует image/video jobs, которые не используют planner. ComfyUI или storage при ошибке дают HTTP 503. `/v1/runtime` по-прежнему показывает доступность всех backend-ов отдельно.
 
 Быстрый read-only smoke API перед/после обслуживания: `npm run smoke:api-load` (100 параллельных запросов `/health` и `/ready`; число задаётся `QWEN_LOAD_REQUESTS`, максимум 1000). Он не запускает GPU-задачи и не меняет данные.
 
@@ -41,7 +43,7 @@ docker compose version
 
 [docker-compose.dev.yml](../docker-compose.dev.yml) сохранён только для временной разработки, если понадобится быстро поднять отдельный PostgreSQL. Он не нужен для runtime: предпочтительный путь — нативный PostgreSQL/systemd либо отдельный PVE/PCT-сервис. `pull_policy: never` предотвращает автоматическую загрузку отсутствующего образа. API, worker и llama.cpp в Compose не заявлены.
 
-На Ubuntu/Sway API, worker и llama.cpp запускаются отдельными systemd user units. ComfyUI остаётся в PVE `pct 103` и управляется средствами контейнера.
+На Linux API, worker и llama.cpp могут запускаться отдельными systemd user units. Конкретные unit-файлы и пути установки зависят от локального окружения.
 
 Для optional Comfy MCP использовать отдельное Python-окружение `~/.venvs/qwen-director`, управляемое `uv`; оно не является частью Node workspace и не должно попадать в git:
 
@@ -51,7 +53,7 @@ uv pip install --python ~/.venvs/qwen-director/bin/python comfy-mcp==0.10.0 comf
 ~/.venvs/qwen-director/bin/comfy-mcp --help
 ```
 
-Для удалённого PCT задавать MCP-процессу `COMFYUI_URL=http://192.168.10.165:8188`. Текущий Codex MCP entry `comfy` ограничивает инструменты read-only allowlist (`server_info`, `discover`, `list_workflow_slots`, `list_workflow_notes`) и использует prompt approval. После изменения конфигурации требуется новая Codex-сессия. MCP server_info не является live health probe удалённого ComfyUI; проверять его отдельным HTTP/API запросом. Не включать submit, upload, установку моделей/custom nodes или lifecycle-команды без отдельного разрешения.
+Для удалённого ComfyUI задавайте `COMFYUI_URL` в локальной конфигурации. MCP `server_info` не является live health probe; проверяйте endpoint отдельным HTTP/API запросом. Не включайте submit, upload, установку моделей/custom nodes или lifecycle-команды без отдельного разрешения.
 
 Если ComfyUI MCP недоступен или его transport закрыт, production-контур не считается остановленным: worker использует прямой ComfyUI HTTP API (`/prompt`, `/history`, `/view`, `/interrupt`) через `ComfyPromptExecutor`/`ComfyWorkbenchExecutor`. MCP остаётся optional discovery/authoring каналом и не является единственной точкой выполнения.
 

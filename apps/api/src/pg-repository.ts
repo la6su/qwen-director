@@ -3,6 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { PgJobRepository } from './pg-jobs.js';
 import type { AssetStorage } from '@qwendirector/storage';
 import { createH3WorkflowProfile, type H3WorkflowProfile } from '@qwendirector/workflow-adapters/h3-profile';
+import { parseMiniMaxDirectorTimeline, minimaxDirectorMediaKey } from '@qwendirector/workflow-adapters/minimax-director-timeline';
+import { buildMiniMaxDirectorDesignProposal } from '@qwendirector/workflow-adapters/minimax-director-plan';
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -106,15 +108,16 @@ export class PgAttemptRepository {
 
   async getTimeline(projectId: string) {
     const result = await this.pool.query(`select sc.id as scene_id, sc.title as scene_title, sc.position as scene_position,
-      sh.id as shot_id, sh.title as shot_title, sh.position as shot_position, sh.plan_revision, sh.duration_seconds, sh.director_prompt, sh.prompt_revision,
+      sh.id as shot_id, sh.title as shot_title, sh.position as shot_position, sh.plan_revision, sh.duration_seconds, sh.director_prompt, sh.prompt_revision, sh.source_metadata,
       coalesce(jsonb_agg(jsonb_build_object('id',av.id,'logicalName',aa.logical_name,'sha256',av.sha256,'mimeType',av.mime_type,'byteSize',av.byte_size,'storageKey',av.storage_key,'provenance',av.provenance,'asset_kind',av.asset_kind,'tags',av.tags) order by aa.logical_name) filter (where av.id is not null),'[]'::jsonb) as assets
+      ,coalesce((select jsonb_agg(jsonb_build_object('id',rav.id,'logicalName',sra.logical_name,'sha256',rav.sha256,'mimeType',rav.mime_type,'asset_kind',rav.asset_kind,'tags',rav.tags,'mediaType',sra.media_type,'role',sra.role) order by sra.position) from shot_reference_assets sra join asset_versions rav on rav.id=sra.asset_version_id where sra.shot_id=sh.id),'[]'::jsonb) as shot_refs
       from scenes sc left join shots sh on sh.scene_id=sc.id left join attempt_assets aa on aa.attempt_id in (select a.id from attempts a join jobs j on j.id=a.job_id where j.shot_id=sh.id) left join asset_versions av on av.id=aa.asset_version_id
       where sc.project_id=$1 group by sc.id,sh.id order by sc.position,sh.position`, [projectId]);
     const scenes = new Map<string, { sceneId: string; title: string; position: number; shots: unknown[] }>();
     for (const row of result.rows) {
       let scene = scenes.get(row.scene_id);
       if (!scene) { scene = { sceneId: row.scene_id, title: row.scene_title, position: row.scene_position, shots: [] }; scenes.set(row.scene_id, scene); }
-      if (row.shot_id) scene.shots.push({ shotId: row.shot_id, title: row.shot_title, position: row.shot_position, planRevision: row.plan_revision, durationSeconds: Number(row.duration_seconds), prompt: row.director_prompt ?? {}, promptRevision: row.prompt_revision, assets: row.assets });
+      if (row.shot_id) scene.shots.push({ shotId: row.shot_id, title: row.shot_title, position: row.shot_position, planRevision: row.plan_revision, durationSeconds: Number(row.duration_seconds), prompt: row.director_prompt ?? {}, promptRevision: row.prompt_revision, sourceMetadata: row.source_metadata ?? {}, references: row.shot_refs ?? [], assets: row.assets });
     }
     return [...scenes.values()].sort((a, b) => a.position - b.position);
   }
@@ -132,6 +135,28 @@ export class PgAttemptRepository {
   }
 
   async listProjects() { return (await this.pool.query('select id,name,created_at from projects order by created_at desc')).rows; }
+  async createDirectorSession(projectId?: string) {
+    const id = randomUUID();
+    return (await this.pool.query('insert into director_agent_sessions(id,project_id) values($1,$2) returning id,project_id,turns,version,created_at,updated_at', [id, projectId ?? null])).rows[0];
+  }
+  async getDirectorSession(id: string) {
+    return (await this.pool.query('select id,project_id,turns,version,created_at,updated_at from director_agent_sessions where id=$1', [id])).rows[0] ?? null;
+  }
+  async appendDirectorSessionExchange(id: string, expectedVersion: number, userContent: string, assistantContent: string, provenance: unknown) {
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0 || userContent.length > 12000 || assistantContent.length > 12000) throw new Error('INVALID_AGENT_TURN');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const row = (await client.query('select turns,version from director_agent_sessions where id=$1 for update', [id])).rows[0];
+      if (!row) throw new Error('DIRECTOR_SESSION_NOT_FOUND');
+      if (Number(row.version) !== expectedVersion) throw new Error('DIRECTOR_SESSION_VERSION_CONFLICT');
+      const now = new Date().toISOString();
+      const turns = [...row.turns, { role:'user', content:userContent, createdAt:now }, { role:'assistant', content:assistantContent, provenance, createdAt:now }].slice(-40);
+      if (JSON.stringify(turns).length > 100_000) throw new Error('DIRECTOR_SESSION_LIMIT');
+      const updated = await client.query('update director_agent_sessions set turns=$2,version=version+1,updated_at=now() where id=$1 returning id,project_id,turns,version,created_at,updated_at', [id, JSON.stringify(turns)]);
+      await client.query('COMMIT'); return updated.rows[0];
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+  }
   async createProject(name: string) {
     if (!name?.trim()) throw new Error('INVALID_PROJECT_NAME');
     const row = (await this.pool.query('insert into projects(id,name) values($1,$2) returning id,name,created_at',[randomUUID(),name.trim()])).rows[0];
@@ -170,9 +195,81 @@ export class PgAttemptRepository {
       await client.query('BEGIN');
       if (!(await client.query('select 1 from scenes where id=$1',[sceneId])).rowCount) throw new Error('SCENE_NOT_FOUND');
       const position = Number((await client.query('select coalesce(max(position),0)+1 as next from shots where scene_id=$1',[sceneId])).rows[0].next);
-      const row = (await client.query('insert into shots(id,scene_id,title,position) values($1,$2,$3,$4) returning id,scene_id,title,position,plan_revision',[randomUUID(),sceneId,title.trim(),position])).rows[0];
+      const row = (await client.query('insert into shots(id,scene_id,title,position,duration_seconds) values($1,$2,$3,$4,$5) returning id,scene_id,title,position,duration_seconds,plan_revision',[randomUUID(),sceneId,title.trim(),position,durationSeconds ?? 5])).rows[0];
       await client.query('COMMIT'); return row;
     } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+  }
+  async importMiniMaxDirectorTimeline(sceneId: string, rawTimeline: unknown, assetVersionByMediaKey: Record<string, string>) {
+    const timeline = parseMiniMaxDirectorTimeline(rawTimeline);
+    if (!assetVersionByMediaKey || typeof assetVersionByMediaKey !== 'object' || Array.isArray(assetVersionByMediaKey)) throw new Error('INVALID_ASSET_VERSION_MAPPING');
+    const sceneInfo = (await this.pool.query('select sc.id,sc.title,sc.project_id,p.name as project_title from scenes sc join projects p on p.id=sc.project_id where sc.id=$1', [sceneId])).rows[0];
+    if (!sceneInfo) throw new Error('SCENE_NOT_FOUND');
+    const proposal = buildMiniMaxDirectorDesignProposal(timeline, {
+      projectId: sceneInfo.project_id, projectTitle: sceneInfo.project_title,
+      sceneId: sceneInfo.id, sceneTitle: sceneInfo.title, assetVersionByMediaKey,
+    });
+    if (!proposal.readyForReview) throw new Error(`AIMIXER_REFERENCES_UNRESOLVED:${proposal.unresolvedReferences.length}`);
+    const sourceDigest = createHash('sha256').update(canonicalJson(timeline.source)).digest('hex');
+    const sortedMapping = Object.fromEntries(Object.entries(assetVersionByMediaKey).sort(([a], [b]) => a.localeCompare(b)));
+    const mappingDigest = createHash('sha256').update(canonicalJson(sortedMapping)).digest('hex');
+    const referencedMedia = timeline.media.filter((media) => media.storageType === 'input');
+    const assetIds = [...new Set(referencedMedia.map((media) => assetVersionByMediaKey[minimaxDirectorMediaKey(media)]))];
+    if (assetIds.some((id) => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) throw new Error('INVALID_ASSET_VERSION_MAPPING');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (!(await client.query('select id from scenes where id=$1 for update', [sceneId])).rowCount) throw new Error('SCENE_NOT_FOUND');
+      const prior = (await client.query('select id,mapping_digest from shot_import_batches where scene_id=$1 and source_type=$2 and source_digest=$3 for update', [sceneId, timeline.schemaVersion, sourceDigest])).rows[0];
+      if (prior) {
+        if (prior.mapping_digest !== mappingDigest) throw new Error('AIMIXER_IMPORT_MAPPING_CONFLICT');
+        const rows = await client.query(`select id,title,position,duration_seconds,source_segment_id,source_metadata,director_prompt
+          from shots where import_batch_id=$1 order by position`, [prior.id]);
+        await client.query('COMMIT');
+        return { batchId: prior.id, sourceDigest, replayed: true, shots: rows.rows };
+      }
+      const assets = await client.query('select id,mime_type from asset_versions where id=any($1::uuid[])', [assetIds]);
+      if (assets.rowCount !== assetIds.length) throw new Error('REFERENCE_ASSET_NOT_FOUND');
+      const mimeById = new Map(assets.rows.map((row: any) => [String(row.id), String(row.mime_type)]));
+      for (const media of referencedMedia) {
+        const assetId = assetVersionByMediaKey[minimaxDirectorMediaKey(media)];
+        const mime = mimeById.get(assetId) ?? '';
+        if (media.kind === 'image' ? !mime.startsWith('image/') : media.kind === 'video' ? !mime.startsWith('video/') : !mime.startsWith('audio/')) throw new Error('REFERENCE_MIME_MISMATCH');
+      }
+      const batchId = randomUUID();
+      await client.query('insert into shot_import_batches(id,scene_id,source_type,source_digest,mapping_digest) values($1,$2,$3,$4,$5)', [batchId, sceneId, timeline.schemaVersion, sourceDigest, mappingDigest]);
+      const position = Number((await client.query('select coalesce(max(position),0) as current from shots where scene_id=$1', [sceneId])).rows[0].current);
+      const imported = [];
+      for (const [index, segment] of timeline.segments.entries()) {
+        const proposalShot = proposal.document.scenes[0].shots[index];
+        const sourceMetadata = {
+          ...proposalShot.sourceMetadata,
+          startSeconds: segment.startFrame / timeline.fps,
+          frameCount: segment.frameCount,
+          fps: timeline.fps,
+          width: timeline.width,
+          height: timeline.height,
+          refMaxSize: timeline.refMaxSize,
+          globalPrompt: timeline.globalPrompt,
+          negativePrompt: segment.negativePrompt,
+        };
+        const prompt = [timeline.globalPrompt.trim(), segment.prompt.trim()].filter(Boolean).join('\n\n');
+        const directorPrompt = { prompt, sound: '', music: 'N/A', transition: '', taskType: segment.taskType, continuityFromPrevious: segment.continuityFromPrevious };
+        const shotId = randomUUID();
+        const row = (await client.query(`insert into shots(id,scene_id,title,position,duration_seconds,director_prompt,import_batch_id,source_segment_id,source_metadata)
+          values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id,title,position,duration_seconds,source_segment_id,source_metadata,director_prompt`,
+        [shotId, sceneId, proposalShot.title, position + index + 1, segment.durationSeconds, directorPrompt, batchId, segment.id, sourceMetadata])).rows[0];
+        const segmentRefs = referencedMedia.filter((media) => media.scopes.includes('global') || media.segmentIds.includes(segment.id));
+        for (const [refPosition, media] of segmentRefs.entries()) {
+          const mediaType = media.kind;
+          const role = mediaType === 'audio' ? 'audio' : mediaType === 'video' ? 'video' : 'picture';
+          await client.query(`insert into shot_reference_assets(shot_id,asset_version_id,position,logical_name,media_type,role)
+            values($1,$2,$3,$4,$5,$6)`, [shotId, assetVersionByMediaKey[minimaxDirectorMediaKey(media)], refPosition, media.fileName, mediaType, role]);
+        }
+        imported.push(row);
+      }
+      await client.query('COMMIT');
+      return { batchId, sourceDigest, replayed: false, shots: imported };
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
   async renameProject(id: string, name: string) { if (!name?.trim()) throw new Error('INVALID_PROJECT_NAME'); const r=await this.pool.query('update projects set name=$2 where id=$1 returning id,name,created_at',[id,name.trim()]); if(!r.rowCount) throw new Error('PROJECT_NOT_FOUND'); return r.rows[0]; }
   async renameScene(id: string, title: string) { if (!title?.trim()) throw new Error('INVALID_SCENE_TITLE'); const r=await this.pool.query('update scenes set title=$2 where id=$1 returning id,project_id,title,position',[id,title.trim()]); if(!r.rowCount) throw new Error('SCENE_NOT_FOUND'); return r.rows[0]; }
@@ -197,7 +294,9 @@ export class PgAttemptRepository {
     const project = (await this.pool.query('select id,name,created_at from projects where id=$1',[projectId])).rows[0]; if (!project) return null;
     const timeline = await this.getTimeline(projectId);
     const jobs = (await this.pool.query(`select j.id,j.state,j.plan_hash,j.adapter_id,j.created_at,j.cancel_requested_at,sh.id as shot_id,sh.title as shot_title,sc.id as scene_id,sc.title as scene_title,a.id as attempt_id,a.state as attempt_state,a.error_detail from jobs j join shots sh on sh.id=j.shot_id join scenes sc on sc.id=sh.scene_id left join lateral (select id,state,error_detail from attempts where job_id=j.id order by created_at desc limit 1) a on true where sc.project_id=$1 order by j.created_at desc`,[projectId])).rows;
-    return { ...project, scenes: timeline, jobs };
+    const assets = (await this.pool.query(`select av.id,av.sha256,av.byte_size,av.mime_type,av.storage_key,av.provenance,av.asset_kind,av.tags,av.created_at,pa.role,pa.logical_name,pa.linked_by,pa.linked_at
+      from project_assets pa join asset_versions av on av.id=pa.asset_version_id where pa.project_id=$1 order by pa.linked_at`,[projectId])).rows;
+    return { ...project, scenes: timeline, jobs, assets };
   }
   async getJobResult(jobId: string) {
     const result = await this.pool.query(`select a.id as attempt_id,a.state as attempt_state,a.error_detail,m.manifest_hash,m.manifest,so.asset_version_id as selected_asset_version_id,so.selected_by,so.selected_at,
@@ -208,18 +307,38 @@ export class PgAttemptRepository {
   }
   async selectJobOutput(jobId: string, assetVersionId: string, actor: string) { if (!actor) throw new Error('INVALID_ACTOR'); const result=await this.pool.query(`insert into job_selected_outputs(job_id,asset_version_id,selected_by) select $1,$2,$3 where exists(select 1 from attempts a join attempt_assets aa on aa.attempt_id=a.id where a.job_id=$1 and aa.asset_version_id=$2) on conflict(job_id) do update set asset_version_id=excluded.asset_version_id,selected_by=excluded.selected_by,selected_at=now() returning job_id,asset_version_id,selected_by,selected_at`,[jobId,assetVersionId,actor]); if (!result.rowCount) throw new Error('ASSET_NOT_LINKED_TO_JOB'); return result.rows[0]; }
   async listAssets(projectId?: string) {
-    const query = projectId ? `select distinct av.id,av.sha256,av.byte_size,av.mime_type,av.storage_key,av.provenance,av.asset_kind,av.tags,av.created_at from asset_versions av join attempt_assets aa on aa.asset_version_id=av.id join attempts a on a.id=aa.attempt_id join jobs j on j.id=a.job_id join shots sh on sh.id=j.shot_id join scenes sc on sc.id=sh.scene_id where sc.project_id=$1 order by av.created_at desc` : 'select id,sha256,byte_size,mime_type,storage_key,provenance,asset_kind,tags,created_at from asset_versions order by created_at desc';
+    const query = projectId ? `select av.id,av.sha256,av.byte_size,av.mime_type,av.storage_key,av.provenance,av.asset_kind,av.tags,av.created_at from asset_versions av where av.id in (
+      select aa.asset_version_id from attempt_assets aa join attempts a on a.id=aa.attempt_id join jobs j on j.id=a.job_id join shots sh on sh.id=j.shot_id join scenes sc on sc.id=sh.scene_id where sc.project_id=$1
+      union select sra.asset_version_id from shot_reference_assets sra join shots sh on sh.id=sra.shot_id join scenes sc on sc.id=sh.scene_id where sc.project_id=$1
+      union select pa.asset_version_id from project_assets pa where pa.project_id=$1
+    ) order by av.created_at desc` : 'select id,sha256,byte_size,mime_type,storage_key,provenance,asset_kind,tags,created_at from asset_versions order by created_at desc';
     return (await this.pool.query(query, projectId ? [projectId] : [])).rows;
   }
-  async saveWorkflowProfile(profile: H3WorkflowProfile) { const client=await this.pool.connect(); try { await client.query('BEGIN'); const bindings=profile.referenceBindings ?? {}; const result=await client.query(`insert into workflow_profiles(id,name,graph,graph_hash,boundary,reference_bindings,active) values($1,$2,$3,$4,$5,$6,false) on conflict(id) do update set name=excluded.name,graph=excluded.graph,graph_hash=excluded.graph_hash,boundary=excluded.boundary,reference_bindings=excluded.reference_bindings,active=false returning id,name,graph_hash,boundary,reference_bindings,created_at,active`,[profile.id,profile.name,profile.graph,profile.graphHash,profile.boundary,bindings]); const next=await client.query('select coalesce(max(revision),0)+1 as revision from workflow_profile_revisions where profile_id=$1',[profile.id]); await client.query('insert into workflow_profile_revisions(profile_id,revision,graph,graph_hash,boundary,reference_bindings) values($1,$2,$3,$4,$5,$6)',[profile.id,next.rows[0].revision,profile.graph,profile.graphHash,profile.boundary,bindings]); await client.query('COMMIT'); return {...result.rows[0],revision:Number(next.rows[0].revision)}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); } }
+  async attachProjectAsset(projectId: string, assetVersionId: string, role: string, logicalName: string, actor: string) {
+    if (!actor?.trim() || !logicalName?.trim()) throw new Error('INVALID_PROJECT_ASSET_METADATA');
+    if (!['master_audio','reference','source_video','deliverable'].includes(role)) throw new Error('INVALID_PROJECT_ASSET_ROLE');
+    const project = await this.pool.query('select 1 from projects where id=$1',[projectId]);
+    if (!project.rowCount) throw new Error('PROJECT_NOT_FOUND');
+    const asset = await this.pool.query('select mime_type from asset_versions where id=$1',[assetVersionId]);
+    if (!asset.rowCount) throw new Error('ASSET_NOT_FOUND');
+    const mimeType = String(asset.rows[0].mime_type ?? '');
+    if (role === 'master_audio' && !mimeType.startsWith('audio/')) throw new Error('PROJECT_ASSET_MIME_MISMATCH');
+    if (role === 'source_video' && !mimeType.startsWith('video/')) throw new Error('PROJECT_ASSET_MIME_MISMATCH');
+    const result = await this.pool.query(`insert into project_assets(project_id,asset_version_id,role,logical_name,linked_by)
+      values($1,$2,$3,$4,$5) on conflict(project_id,asset_version_id) do update set role=excluded.role,logical_name=excluded.logical_name,linked_by=excluded.linked_by,linked_at=now()
+      returning project_id,asset_version_id,role,logical_name,linked_by,linked_at`,[projectId,assetVersionId,role,logicalName.trim(),actor.trim()]);
+    return result.rows[0];
+  }
+  async saveWorkflowProfile(profile: H3WorkflowProfile) { const client=await this.pool.connect(); try { await client.query('BEGIN'); const bindings=profile.referenceBindings ?? {}; const result=await client.query(`insert into workflow_profiles(id,name,graph,graph_hash,boundary,reference_bindings,active) values($1,$2,$3,$4,$5,$6,false) on conflict(id) do update set name=excluded.name,graph=excluded.graph,graph_hash=excluded.graph_hash,boundary=excluded.boundary,reference_bindings=excluded.reference_bindings,active=false returning id,name,graph_hash,boundary,reference_bindings,created_at,active`,[profile.id,profile.name,profile.graph,profile.graphHash,profile.boundary,bindings]); const next=await client.query('select coalesce(max(revision),0)+1 as revision from workflow_profile_revisions where profile_id=$1',[profile.id]); await client.query('insert into workflow_profile_revisions(profile_id,revision,graph,graph_hash,boundary,reference_bindings) values($1,$2,$3,$4,$5,$6)',[profile.id,next.rows[0].revision,profile.graph,profile.graphHash,profile.boundary,bindings]); await client.query('COMMIT'); return {...result.rows[0],revision:Number(next.rows[0].revision),model_stack:profile.modelStack}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); } }
   async saveWorkbenchProfile(profile: { id: string; name: string; kind: string; graph: Record<string, unknown>; graphHash: string; boundary: Record<string, unknown> }) {
     const client=await this.pool.connect(); try { await client.query('BEGIN'); const bindings={ workbenchKind: profile.kind }; const result=await client.query(`insert into workflow_profiles(id,name,graph,graph_hash,boundary,reference_bindings,active) values($1,$2,$3,$4,$5,$6,false) on conflict(id) do update set name=excluded.name,graph=excluded.graph,graph_hash=excluded.graph_hash,boundary=excluded.boundary,reference_bindings=excluded.reference_bindings,active=false returning id,name,graph_hash,boundary,reference_bindings,created_at,active`,[profile.id,profile.name,profile.graph,profile.graphHash,profile.boundary,bindings]); const next=await client.query('select coalesce(max(revision),0)+1 as revision from workflow_profile_revisions where profile_id=$1',[profile.id]); await client.query('insert into workflow_profile_revisions(profile_id,revision,graph,graph_hash,boundary,reference_bindings) values($1,$2,$3,$4,$5,$6)',[profile.id,next.rows[0].revision,profile.graph,profile.graphHash,profile.boundary,bindings]); await client.query('COMMIT'); return {...result.rows[0],revision:Number(next.rows[0].revision)}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
   }
   private profileReadModel(row: any) {
-    try { const derived=createH3WorkflowProfile(row.id,row.name,row.graph,row.reference_bindings ?? undefined); return { ...row, quality_hint: derived.qualityHint, sampling_steps: derived.samplingSteps, loras: derived.loras }; }
+    try { const derived=createH3WorkflowProfile(row.id,row.name,row.graph,row.reference_bindings ?? undefined); return { ...row, quality_hint: derived.qualityHint, sampling_steps: derived.samplingSteps, loras: derived.loras, model_stack: derived.modelStack }; }
     catch { return row; }
   }
   async listWorkflowProfiles() { return (await this.pool.query('select id,name,graph,graph_hash,boundary,reference_bindings,created_at,active,(select max(revision) from workflow_profile_revisions r where r.profile_id=workflow_profiles.id) as revision from workflow_profiles where active=true order by created_at desc')).rows.map((row) => this.profileReadModel(row)); }
+  async listWorkflowProfileCatalog() { return (await this.pool.query("select id,name,graph,graph_hash,boundary,reference_bindings,created_at,active,(select max(revision) from workflow_profile_revisions r where r.profile_id=workflow_profiles.id) as revision from workflow_profiles where coalesce(reference_bindings->>'workbenchKind','')='' order by active desc,created_at desc")).rows.map((row) => { const profile=this.profileReadModel(row); delete profile.graph; return profile; }); }
   async getWorkflowProfile(id: string) { const row=(await this.pool.query('select id,name,graph,graph_hash,boundary,reference_bindings,created_at,active from workflow_profiles where id=$1',[id])).rows[0]; return row ? this.profileReadModel(row) : null; }
   async activateWorkflowProfile(id: string) { const result=await this.pool.query('update workflow_profiles set active=true where id=$1 returning id,name,graph_hash,boundary,created_at,active',[id]); return result.rows[0] ?? null; }
   async listWorkflowProfileRevisions(id: string) { return (await this.pool.query('select profile_id,revision,graph,graph_hash,boundary,reference_bindings,created_at from workflow_profile_revisions where profile_id=$1 order by revision desc',[id])).rows; }

@@ -1,4 +1,4 @@
-const baseUrl = process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188';
+const baseUrl = process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188';
 const response = await fetch(`${baseUrl}/object_info`);
 if (!response.ok) throw new Error(`COMFY_OBJECT_INFO_${response.status}`);
 const info = await response.json();

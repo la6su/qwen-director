@@ -43,6 +43,36 @@ operator / decision (keep | reject | investigate)
 - Наличие ноды не доказывает совместимость с текущим H3-графом: сначала импорт отдельного workflow, затем preflight и короткий mock/real smoke на целевой GPU.
 - Следующее действие для quality: зафиксировать digest `MiniMax-H3-Ref2VA-Acc-8Step.safetensors`, импортировать отдельный Ref2V workflow profile с этой LoRA, выполнить preflight и провести три парных A/B-прогона на одинаковых входах.
 
+## Синтез аудита практик MiniMax H3 (2026-11-14)
+
+### Рекомендуемая схема производства
+
+| Этап | Решение для QwenDirector | Основание / ограничение |
+|---|---|---|
+| Планирование и драфт | Сохранять текущий provisional Ref2VA INT8 pruned + Pika Flex как отдельный профиль. Локальный `video_pika_h3_flex_ref2va.json` рендерит 1344×768 (~1.03 MP). Генерировать шоты/сегменты независимо и хранить draft до ручного решения. | Это уже имеющийся baseline. Переход на 0.5 MP не нужен без A/B; он может уменьшить мелкий объект до нестабильного числа пикселей. |
+| Монтаж длинной сцены | Передавать сегменты как отдельные QD shots/jobs, хранить исходные frame offsets и reference lineage. Пробовать 124 или 192 кадра (5.17/8 с) как управляемые длительности там, где действие допускает разрез; сохранять overlap отдельно от чистой длины. Экспортировать сегменты независимо и монтировать в NLE. | Timeline v5 parser уже строит shot proposal. Длинные 362-кадровые сегменты не дробить автоматически: это изменит авторскую фазу и требует review. 22 кадра — стартовая настройка, не оптимум для каждого движения. |
+| Необязательный 2K finish | Отдельная ветка после принятого draft: encode → 3D latent upscaler → Open-H3 re-noise/refine → сохранить refined latent → decode. Для чувствительных к идентичности кадров оставить draft/обычный апскейл альтернативой и сравнить кадры до/после. | Это генеративное восстановление деталей, а не нейтральное масштабирование: возможен drift лиц, орнаментов, логотипов и текста. `start_sigma=0` в установленном NVIDIA recipe означает штатную release-сетку, начинающуюся около 0.909; это не слабая доводка. Локальная документация Open-H3 сообщает, что `0.8` держит результат ближе к draft, но это другая sigma-сетка и компромисс по деталям. |
+| Recovery / VRAM | Всегда ставить локальную `OpenH3SaveRefinedLatent` перед тяжёлым decode в экспериментальном 2K графе; хранить latent как промежуточный артефакт с provenance. Запускать короткий 5-секундный тест на RTX 5090 и измерять фактический peak VRAM, RAM и decode latency. | Save Latent позволяет повторить decode после OOM/сбоя; он сам по себе не уменьшает пик памяти. Установленный plugin README приводит 45 GB peak для 15-секундного 2K fast decode на 72-GB карте; 32-GB RTX 5090 не следует считать проверенной для полного 15-секундного пути. |
+| Далёкие лица / мелкие детали | В дальнем плане предпочитать силуэт, контровой свет, профиль/спину и foreground occlusion; важную мимику выносить в отдельный крупный план и планировать отдельное восстановление лица только после A/B. | Режиссёрская страховка полезна независимо от конкретного sampler. FACE/VOSR nodes/версии и их качество надо проверить на выбранном локальном наборе, а не подразумевать из наличия имени node. |
+
+### Что установлено локально
+
+- ComfyUI 0.45 содержит native H3 и `MiniMaxH3LatentUpscaleWithModel`; установлены `ComfyUI-Open-H3-Regenerate` commit `9b686c5`, `Comfyui_Minimax_h3_latent_Upscaler`, upscaler weights и локальные Open-H3 r128 / Sharp curve веса. Есть `OpenH3SaveRefinedLatent` и `MiniMaxH3SaveLatent`. Значит, отдельный local finish workflow технически можно исследовать без облачного вызова или скачивания новых весов.
+- `MiniMaxH3DirectorSelfLift`, `MiniMaxH3DirectorFaceRefine`, `SolAttnPatch` и `BlockSparseAttention` присутствуют в `/object_info`; Singularity Ref2VA модели тоже лежат локально. Это наличие, не quality verdict. Veta/VSA node в текущем `/object_info` не обнаружен.
+- Проверенный Pika Flex Ref2VA workflow использует Pika Ref2VA LoRA 1.0 и 1344×768. В существующем 2K локальном workflow видна иная экспериментальная компоновка; её нельзя принимать за валидированный QD profile без точного graph/schema audit.
+
+### Что из предоставленного аудита не становится правилом по умолчанию
+
+- 0.5–0.6 MP как универсальный минимум draft, обязательные 8–12 шагов для чистого звука, превосходство Pika по количеству сцен, точная потеря качества от каждой перегонки, 50–60% цена VRAM cleanup, диапазоны для Veta/VSA/SoL и строго английский язык для отсутствия цветных артефактов — это наблюдения отдельных workflow/video, без предоставленных исходных роликов, материалов сравнения и повторяемых локальных прогонов. В QwenDirector они могут стать тестируемыми гипотезами, но не preflight запретами.
+- Hosted MiniMax H3 Regenerate-to-2K и локальный NVIDIA Open-H3-Regenerate-2K — разные пути. Hosted node отправляет готовый 768P клип в MiniMax job; open pipeline использует локальные открытые веса и повторный diffusion pass. QwenDirector оставляет cloud path выключенным по local-first контракту.
+- Open-H3 refiner объединяет собственный refiner с FL2VA Turbo и LMS Sharp. Его нельзя подключать поверх Pika Flex как ещё одну LoRA. Корректный кандидат — самостоятельный второй workflow/profile, отдельный от Pika draft.
+
+### Минимальный честный A/B для локального finish
+
+Использовать один принятый 124-кадровый 1344×768 Pika draft с теми же prompt, seed и references. Сравнить draft и локальный Open-H3 outputs при release sigma (0), затем ближний к draft sigma (0.8); отдельно сохранить один identity-sensitive интерьерный дубль с текстом/узором и один кадр с малой фигурой. Записать peak VRAM/RAM и время отдельно для encode/upscale/refine/decode. Сначала — 5 секунд, RTX 5090, один job, без параллельной нагрузки. Acceptance: движение и монтажные границы не ломаются; нет новых/изменённых объектов в важных инвариантах; аудио совпадает или его сохранение явно назначено; восстановление decode из сохранённого latent работает. Это предложение эксперимента, а не уже выполненный тест.
+
+Источники для проверки реализации: [NVIDIA Open-H3-Regenerate-2K](https://nvlabs.github.io/Sana/Open-H3-Regenerate-2K/), [установленный ComfyUI Open-H3 Regenerate](https://github.com/rdh9616/ComfyUI-Open-H3-Regenerate), [ComfyUI hosted MiniMax H3 Regenerate node docs](https://github.com/Comfy-Org/embedded-docs/blob/main/comfyui_embedded_docs/docs/MinimaxHailuo03RegenerateNode/en.md). Они описывают разные локальный и hosted пути; hosted node не включается в local-first QwenDirector.
+
 ### Уточнение для SCENE-02 RefMod I2V
 
 Исправлено после живого A/B 2026-10-10: сначала был выполнен baseline `MiniMaxH3ImageToVideo` на INT8 FL2VA, 16 шагов без LoRA; затем корректный FL2V Turbo8 BF16 LoRA на 8 шагах. Оба jobs завершились, но заметного улучшения качества между ними нет. Вывод A/B ограниченный: число шагов/наличие этой Turbo LoRA не выглядит единственной причиной. Ref2VA LoRA по-прежнему относится к `MiniMaxH3ReferenceToVideo` и не подходит этому image-to-video графу.
@@ -65,7 +95,16 @@ NVFP4 пока не считается причиной дефектов: diffus
 - В доступном серверном входе найден только начальный кадр; отсутствующий last-frame отключён в обоих H3 conditioning nodes. Первый кадр сохранён и подан на оба прохода через соответствующий resize. Вариант поэтому остаётся I2V, а не FL2V с двумя независимыми keyframes.
 - RTX 5090 / ComfyUI 0.39.0 / PyTorch 2.13.0+cu130; очередь перед запуском была пустой. Выполнение Comfy завершилось `success` без node errors; наблюдаемый минимум свободной VRAM около 0.88 GiB.
 - Результат сохранён в CAS как AssetVersion `ba37e183-1040-4960-8998-fc31120bea98`, SHA-256 `145bb2e89cc8305c65aebb8d72bc9a9634182dc6eb6b47d3183bd503087ce02d`, 5,668,427 bytes. Lineage указывает на исходный кадр. Comfy prompt ID: `25423e84-dc69-41d4-b2b0-d83a7e94aada`.
-- Это теперь подтверждённый quality-кандидат и текущий лучший известный результат для этой проверки; пока не объявлять production default по одному subjective review. Следующие сравнения должны сохранять этот граф и менять только один параметр за раз.
+- На дату эксперимента это был подтверждённый PDD quality-кандидат для данной SCENE-02 проверки, не production default. В ноябре пользователь уточнил, что пока выше оценивает стандартный Ref2V INT8 pruned + Pika Flex; PDD/VEDA не считать текущими лидерами без новых сравнений.
 
 Сохранённый `video_mmh3_i2v_lora_PDD_ACC_8NEW.json` не является эквивалентом этого корректного PDD режима: текущий false toggle выбирает базовый UNet/20 steps; true ветка выбирает PDD model, но остаются `res_multistep` и `BasicScheduler`, причём PDD Apply sigmas не поданы в sampler. Для PDD использовать Euler и sigma output от Apply, как в рабочем двухпроходном графе.
 
+
+
+### Текущий пользовательский лидер: standard Ref2V + Pika Flex (2026-11-14)
+
+Пользователь сообщил, что лучший вариант на текущем этапе анализа — стандартная модель `minimax_h3_ref2va_pruned_int8_convrot.safetensors` с `pika_h3_flex_ref2va_v1_bf16.safetensors`. Это предварительная оценка, не финальное решение и не production default; пользователь продолжает собственные тесты. PDD и VEDA остаются альтернативами.
+
+Сохранённый локальный UI workflow `video_pika_h3_flex_ref2va.json` содержит 21 узел. Его UI→API import, installed ComfyUI `/object_info` schema validation, стандартная H3 R2V boundary, profile creation, prompt/reference injection и runtime LoRA preflight прошли read-only dry-run; `pika_h3_flex_ref2va_v1_bf16.safetensors` доступна, missing LoRAs нет. GPU submit не выполнялся. Профиль корректно показывает `qualityHint: unknown`: имя Pika Flex не задаёт известное число sampling steps.
+
+В QwenDirector model stack теперь выводится из immutable graph (`UNETLoader`, LoRA, CLIP/VAE loaders) и показывается рядом с именем профиля. Это помогает отличать кандидатов; выбор/default автоматически не меняется.

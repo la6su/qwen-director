@@ -1,0 +1,325 @@
+{
+  "92": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "130",
+        0
+      ],
+      "filename_prefix": "qwendirector/AI-Everywhere/verse1_refmod_preview",
+      "format": "auto",
+      "format.codec": "auto",
+      "codec": "auto"
+    }
+  },
+  "115": {
+    "class_type": "ResolutionSelector",
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.5,
+      "multiple": 32
+    }
+  },
+  "119": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  },
+  "120": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "121": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "125",
+        0
+      ],
+      "vae": [
+        "120",
+        0
+      ]
+    }
+  },
+  "122": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "125",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    }
+  },
+  "123": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "lcm"
+    }
+  },
+  "125": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "129",
+        0
+      ],
+      "guider": [
+        "126",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "147",
+        0
+      ],
+      "latent_image": [
+        "136",
+        1
+      ]
+    }
+  },
+  "126": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "145",
+        0
+      ],
+      "conditioning": [
+        "201",
+        0
+      ]
+    }
+  },
+  "127": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "128": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "129": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 261662374822964
+    }
+  },
+  "130": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "122",
+        0
+      ],
+      "audio": [
+        "121",
+        0
+      ],
+      "fps": 24,
+      "bit_depth": 8,
+      "color_space": "sRGB",
+      "codec": "none"
+    }
+  },
+  "131": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "values.a": [
+        "132",
+        0
+      ],
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17"
+    }
+  },
+  "132": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 5
+    }
+  },
+  "136": {
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "inputs": {
+      "clip": [
+        "128",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "audio_vae": [
+        "120",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "149",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "150",
+        0
+      ],
+      "prompt": [
+        "138",
+        0
+      ],
+      "width": [
+        "115",
+        0
+      ],
+      "height": [
+        "115",
+        1
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "ref_image_size": "match",
+      "ref_images.ref_image_2": [
+        "151",
+        0
+      ]
+    }
+  },
+  "138": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": {
+      "value": "subject_definitions:\n<Subject 1> is the fictional young adult male creator whose face identity is carried by the loaded RefMod and <Picture 1>.\n<Subject 2> is the creator's charcoal hoodie, dark trousers, and natural build, anchored by the loaded RefMod and <Picture 2>.\n<Subject 3> is the user's home studio from <Picture 3>: the long wooden desk and monitors, window and curtains, pendant, open shelves, plants, sofa, and patterned rug.\nsummary:\nA single continuous 5.17-second Ref2VA shot for AI Everywhere. The camera begins in the user's dark home studio, enters the monitor, and reveals an immersive volumetric digital world rather than a flat image on a screen.\nretention_analysis:\n<Subject 1> (appears in the opening of [Shot 1]): fully_preserved - preserve the creator's face, hair, age, and proportions from the RefMod and <Picture 1>.\n<Subject 2> (appears in the opening of [Shot 1]): fully_preserved - retain the charcoal hoodie, trousers, and body build from the RefMod and <Picture 2>.\n<Subject 3> (appears in the opening of [Shot 1]): fully_preserved - preserve the actual room geometry and furniture from <Picture 3> until the camera crosses the display plane; the room transitions out of view through the camera's continuous forward movement, not by deforming the furniture.\ndetailed_description:\n[Shot 1] One uninterrupted live-action cinematic shot begins inside <Subject 3> at night. Preserve the room layout from <Picture 3>: long wooden desk along the left wall, monitors, curtained window behind it, pendant light, open wooden shelving and houseplants on the right, gray sofa, and patterned rug. <Subject 1> sits at the desk wearing <Subject 2>, no outer jacket. Use a dark immersive exposure: deep blue-black shadows retain detail, a few low warm amber practical lights mark the wood and plants, and cool cyan monitor light edges the creator. The camera is positioned just behind and to the side of the creator; the main monitor fills the near foreground. The screen starts as an empty dark plane. A luminous cyan perspective grid ignites on its surface and extends toward an impossible vanishing point. The camera pushes forward in one smooth continuous move, crosses through the physical monitor plane, and enters the grid. The monitor border recedes behind the camera; the actual room remains geometrically stable while it leaves frame through this camera travel. The empty grid unfolds into an immersive deep 3D world: towering translucent geometric structures rise at different distances, layered platforms and suspended pathways drift through space, and volumetric cyan light ribbons sweep through the depth with occasional warm amber glints. Strong foreground, middle-ground, and distant parallax make the viewer feel inside the world. The digital environment fills the whole frame by the end. This is an original abstract virtual world with monumental 3D depth, not a flat monitor wallpaper or a conventional skyline. No readable text, logos, software interface, hard cut, or room geometry morph.\noverall_soundscape:\nQuiet room tone, soft keyboard taps, a low computer fan, then a subtle rising digital hum and airy spatial tone as the camera enters the virtual world. No speech or singing.\nnon_diegetic_music:\nN/A. The user's master song is added in the edit."
+    }
+  },
+  "145": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "127",
+        0
+      ],
+      "lora_name": "pika_h3_flex_ref2va_v1_bf16.safetensors",
+      "strength_model": 1
+    }
+  },
+  "147": {
+    "class_type": "ManualSigmas",
+    "inputs": {
+      "sigmas": "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"
+    }
+  },
+  "149": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "face-anchor.png"
+    }
+  },
+  "150": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "wardrobe-front.png"
+    }
+  },
+  "151": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "room-reference.jpg"
+    }
+  },
+  "200": {
+    "class_type": "MiniMaxH3RefModsLoader",
+    "inputs": {
+      "show_info": true,
+      "mod_1": "QwenDirector/AI-Everywhere/ai_everywhere_hero",
+      "strength_1": 1,
+      "copies_1": 1,
+      "mod_2": "(none)",
+      "strength_2": 1,
+      "copies_2": 1,
+      "mod_3": "(none)",
+      "strength_3": 1,
+      "copies_3": 1,
+      "mod_4": "(none)",
+      "strength_4": 1,
+      "copies_4": 1,
+      "mod_5": "(none)",
+      "strength_5": 1,
+      "copies_5": 1,
+      "mod_6": "(none)",
+      "strength_6": 1,
+      "copies_6": 1,
+      "mod_7": "(none)",
+      "strength_7": 1,
+      "copies_7": 1,
+      "mod_8": "(none)",
+      "strength_8": 1,
+      "copies_8": 1,
+      "max_total_tokens": 0,
+      "components_1": "All",
+      "visual_strength_1": 1,
+      "audio_strength_1": 1,
+      "components_2": "All",
+      "visual_strength_2": 1,
+      "audio_strength_2": 1,
+      "components_3": "All",
+      "visual_strength_3": 1,
+      "audio_strength_3": 1,
+      "components_4": "All",
+      "visual_strength_4": 1,
+      "audio_strength_4": 1,
+      "components_5": "All",
+      "visual_strength_5": 1,
+      "audio_strength_5": 1,
+      "components_6": "All",
+      "visual_strength_6": 1,
+      "audio_strength_6": 1,
+      "components_7": "All",
+      "visual_strength_7": 1,
+      "audio_strength_7": 1,
+      "components_8": "All",
+      "visual_strength_8": 1,
+      "audio_strength_8": 1
+    }
+  },
+  "201": {
+    "class_type": "MiniMaxH3RefModApply",
+    "inputs": {
+      "conditioning": [
+        "136",
+        0
+      ],
+      "mods": [
+        "200",
+        0
+      ],
+      "override": false,
+      "retention": 1,
+      "curve_direction": "constant",
+      "scramble_seed": -1,
+      "curve_shape": "linear",
+      "curve_value": 1,
+      "graph_preset": "(none)",
+      "scramble_mode": "shuffle",
+      "scramble_keep": 1,
+      "max_total_tokens": 0,
+      "save_preset_as": ""
+    }
+  }
+}

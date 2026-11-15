@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { compileDirectorPrompt, getDirectorPromptCompleteness, type DirectorPromptFields } from '@qwendirector/contracts/prompt';
+import { compileDirectorPrompt, compileH3Fl2VAPrompt, compileH3Ref2VAPrompt, compileQwenImageEditPrompt, getDirectorPromptCompleteness, type DirectorPromptFields } from '@qwendirector/contracts/prompt';
 import { createH3WorkflowProfile, createH3RefModWorkflowProfile } from '@qwendirector/workflow-adapters/h3-profile';
+import { validateWorkbenchGraph } from '@qwendirector/workflow-adapters/workbench-catalog';
+import type { WorkbenchKind } from '@qwendirector/workflow-adapters/workbenches';
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -22,7 +24,7 @@ export class PgJobRepository {
     return r.rows[0] ?? null;
   }
 
-  async createDirector(body: { project: string; scene: string; shot: string; projectId?: string; sceneId?: string; shotId?: string; idempotencyKey?: string } & DirectorPromptFields & { adapterId?: string; workflow?: Record<string, any>; workflowProfileId?: string; workflowProfileName?: string; workflowReferenceBindings?: { mode?:'refmod-i2v'; imageNodeIds?: string[]; audioNodeIds?: string[]; workbenchKind?: string }; references?: Array<{assetVersionId:string;filename:string;type?:'image'|'audio';role?:'picture'|'actor'|'set'|'prop'|'layout'|'audio'}>; width?: number; height?: number; length?: number; seed?: number; origin?: 'user'|'lab'|'system' }) {
+  async createDirector(body: { project: string; scene: string; shot: string; projectId?: string; sceneId?: string; shotId?: string; idempotencyKey?: string } & DirectorPromptFields & { adapterId?: string; workflow?: Record<string, any>; workflowProfileId?: string; workflowProfileName?: string; workflowReferenceBindings?: { mode?:'refmod-i2v'|'fl2va-i2v'; imageNodeIds?: string[]; audioNodeIds?: string[]; videoNodeIds?: string[]; workbenchKind?: string; outputBindings?: Record<string,string> }; references?: Array<{assetVersionId:string;filename:string;type?:'image'|'audio'|'video';role?:'picture'|'actor'|'set'|'prop'|'layout'|'first-frame'|'last-frame'|'audio'|'video'}>; width?: number; height?: number; length?: number; seed?: number; origin?: 'user'|'lab'|'system' }) {
     const c = await this.pool.connect();
     try {
       await c.query('BEGIN');
@@ -44,7 +46,6 @@ export class PgJobRepository {
         await c.query('insert into scenes(id,project_id,title,position) values($1,$2,$3,1)', [sceneId, projectId, body.scene]);
         await c.query('insert into shots(id,scene_id,title,position) values($1,$2,$3,1)', [shotId, sceneId, body.shot]);
       }
-      const compiledPrompt = compileDirectorPrompt(body);
       const promptCompleteness = getDirectorPromptCompleteness(body);
       const requestHash = createHash('sha256').update(canonicalJson(body)).digest('hex');
       const idem = body.idempotencyKey?.trim() || `director:${shotId}`;
@@ -58,34 +59,57 @@ export class PgJobRepository {
         where id=$1`, [shotId, {
           prompt: body.prompt ?? '', camera: body.camera ?? '', action: body.action ?? '',
           composition: body.composition ?? '', lighting: body.lighting ?? '',
-          sound: body.sound ?? '', transition: body.transition ?? '',
+          sound: body.sound ?? '', music: body.music ?? '', transition: body.transition ?? '',
         }]);
       let workflowProfile;
       if ((body.adapterId ?? 'llama.cpp') === 'comfyui') {
         let source = body.workflow;
-        if (body.workflowProfileId) { const stored=(await c.query('select id,name,graph,graph_hash,boundary,reference_bindings from workflow_profiles where id=$1 and active=true',[body.workflowProfileId])).rows[0]; if (!stored) throw new Error('WORKFLOW_PROFILE_NOT_ACTIVE'); source=stored.graph; body.workflowReferenceBindings = stored.reference_bindings ?? {}; }
+        if (body.workflowProfileId) { const stored=(await c.query('select id,name,graph,graph_hash,boundary,reference_bindings from workflow_profiles where id=$1 and active=true',[body.workflowProfileId])).rows[0]; if (!stored) throw new Error('WORKFLOW_PROFILE_NOT_ACTIVE'); source=stored.graph; body.workflowReferenceBindings = { ...(stored.reference_bindings ?? {}), ...(stored.boundary?.outputBindings ? { outputBindings: stored.boundary.outputBindings } : {}) }; }
         if (!source) throw new Error('INVALID_WORKFLOW_PLAN');
         const workbenchKind = body.workflowReferenceBindings?.workbenchKind;
-        if (workbenchKind && ['actor','scene','prop','layout'].includes(workbenchKind)) {
-          workflowProfile = { schemaVersion: '1.0', id: body.workflowProfileId ?? `${workbenchKind}-custom`, name: body.workflowProfileName ?? `${workbenchKind} workbench`, graph: source, graphHash: createHash('sha256').update(canonicalJson(source)).digest('hex'), boundary: { workbenchKind }, referenceBindings: body.workflowReferenceBindings, qualityHint: 'unknown', loras: [] };
+        if (workbenchKind && ['actor','scene','prop','layout','image-edit','image-generate','refmod-create'].includes(workbenchKind)) {
+          const validation = validateWorkbenchGraph(workbenchKind as WorkbenchKind, source, undefined, body.workflowReferenceBindings?.outputBindings);
+          workflowProfile = { schemaVersion: '1.0', id: body.workflowProfileId ?? `${workbenchKind}-custom`, name: body.workflowProfileName ?? `${workbenchKind} workbench`, graph: source, graphHash: createHash('sha256').update(canonicalJson(source)).digest('hex'), boundary: { workbenchKind, outputBindings: validation.outputBindings }, referenceBindings: body.workflowReferenceBindings, qualityHint: 'unknown', loras: [] };
         } else workflowProfile = body.workflowReferenceBindings?.mode === 'refmod-i2v'
           ? createH3RefModWorkflowProfile(body.workflowProfileId ?? 'h3-refmod-custom', body.workflowProfileName ?? 'H3 RefMod workflow', source, body.workflowReferenceBindings)
           : createH3WorkflowProfile(body.workflowProfileId ?? 'h3-custom', body.workflowProfileName ?? 'H3 workflow', source, body.workflowReferenceBindings);
         const imageNodeCount = Object.values(workflowProfile.graph).filter((node) => node?.class_type === 'LoadImage').length;
         const boundImageCount = workflowProfile.referenceBindings?.imageNodeIds?.length ?? 0;
-        if (imageNodeCount > boundImageCount) throw new Error('H3_WORKFLOW_IMAGE_BINDINGS_REQUIRED');
+        if (!workbenchKind && imageNodeCount > boundImageCount) throw new Error('H3_WORKFLOW_IMAGE_BINDINGS_REQUIRED');
       }
-      const references = Array.isArray((body as any).references) ? (body as any).references.map((reference: any) => ({ assetVersionId: reference.assetVersionId, filename: reference.filename, type: reference.type ?? 'image', role: reference.role ?? (reference.type === 'audio' ? 'audio' : 'picture') })) : [];
+      const submittedReferences = Array.isArray((body as any).references) ? (body as any).references : [];
+      const references = submittedReferences.length
+        ? submittedReferences.map((reference: any) => ({ assetVersionId: reference.assetVersionId, filename: reference.filename, type: reference.type ?? 'image', role: reference.role ?? (reference.type === 'audio' ? 'audio' : reference.type === 'video' ? 'video' : 'picture') }))
+        : (await c.query('select asset_version_id as "assetVersionId",logical_name as filename,media_type as type,role from shot_reference_assets where shot_id=$1 order by position', [shotId])).rows;
       if (references.some((reference: any) => typeof reference.assetVersionId !== 'string' || typeof reference.filename !== 'string')) throw new Error('INVALID_REFERENCE_PLAN');
-      if (references.some((reference: any) => !['picture','actor','set','prop','layout','audio'].includes(reference.role) || (reference.type === 'audio' && reference.role !== 'audio') || (reference.type !== 'audio' && reference.role === 'audio'))) throw new Error('INVALID_REFERENCE_ROLE');
+      if (references.some((reference: any) => !['picture','actor','set','prop','layout','first-frame','last-frame','audio','video'].includes(reference.role) || (reference.type === 'audio' && reference.role !== 'audio') || (reference.type === 'video' && reference.role !== 'video') || (reference.type !== 'audio' && reference.type !== 'video' && ['audio','video'].includes(reference.role)) || (['first-frame','last-frame'].includes(reference.role) && reference.type !== 'image'))) throw new Error('INVALID_REFERENCE_ROLE');
       if (references.length) {
         const ids = references.map((reference: any) => reference.assetVersionId);
         const found = await c.query('select id,mime_type from asset_versions where id = any($1::uuid[])', [ids]);
         if (found.rowCount !== new Set(ids).size) throw new Error('REFERENCE_ASSET_NOT_FOUND');
         const mimeById = new Map(found.rows.map((row:any)=>[row.id, String(row.mime_type)]));
-        if (references.some((reference:any) => reference.type === 'audio' ? !mimeById.get(reference.assetVersionId)?.startsWith('audio/') : !mimeById.get(reference.assetVersionId)?.startsWith('image/'))) throw new Error('REFERENCE_MIME_MISMATCH');
+        if (references.some((reference:any) => reference.type === 'audio' ? !mimeById.get(reference.assetVersionId)?.startsWith('audio/') : reference.type === 'video' ? !mimeById.get(reference.assetVersionId)?.startsWith('video/') : !mimeById.get(reference.assetVersionId)?.startsWith('image/'))) throw new Error('REFERENCE_MIME_MISMATCH');
       }
-      const plan = { project: body.project, scene: body.scene, shot: body.shot, catalog: { projectId, sceneId, shotId }, prompt: compiledPrompt, promptCompleteness, width: body.width, height: body.height, length: body.length, seed: body.seed, directorFields: { ...body, references }, references, workflowProfile };
+      if (workflowProfile && 'workbenchKind' in workflowProfile.boundary && references.some((reference:any) => reference.type !== 'image')) throw new Error('WORKBENCH_REFERENCE_MEDIA_UNSUPPORTED');
+      if (workflowProfile?.referenceBindings?.mode === 'refmod-i2v' && references.some((reference:any) => reference.type !== 'image')) throw new Error('H3_REFMOD_REFERENCE_MEDIA_UNSUPPORTED');
+      if (workflowProfile && !('workbenchKind' in workflowProfile.boundary) && workflowProfile.boundary.mode === 'fl2va-i2v') {
+        const frames = references.filter((reference: any) => reference.type === 'image');
+        if (references.length !== 2 || frames.length !== 2 || frames.filter((reference: any) => reference.role === 'first-frame').length !== 1 || frames.filter((reference: any) => reference.role === 'last-frame').length !== 1) throw new Error('H3_FL2VA_FIRST_AND_LAST_FRAME_REFERENCES_REQUIRED');
+      }
+      if (workflowProfile && !('workbenchKind' in workflowProfile.boundary)) {
+        const bindings = workflowProfile.referenceBindings ?? {};
+        if (references.filter((reference:any) => reference.type === 'audio').length > (bindings.audioNodeIds?.length ?? 0)) throw new Error('H3_WORKFLOW_AUDIO_BINDINGS_REQUIRED');
+        if (references.filter((reference:any) => reference.type === 'video').length > ((bindings as any).videoNodeIds?.length ?? 0)) throw new Error('H3_WORKFLOW_VIDEO_BINDINGS_REQUIRED');
+      }
+      const boundaryMode = workflowProfile && !('workbenchKind' in workflowProfile.boundary) ? workflowProfile.boundary.mode : undefined;
+      const planLength = boundaryMode === 'fl2va-i2v' ? Number(body.length ?? 124) : body.length;
+      const workbenchKind = workflowProfile && 'workbenchKind' in workflowProfile.boundary ? workflowProfile.boundary.workbenchKind : undefined;
+      const compiledPrompt = workbenchKind
+        ? workbenchKind === 'image-edit' ? compileQwenImageEditPrompt(body, references) : compileDirectorPrompt(body)
+        : boundaryMode === 'fl2va-i2v' ? compileH3Fl2VAPrompt(body, Number(planLength))
+          : boundaryMode === undefined || boundaryMode === 'r2v-2stage-veda' ? compileH3Ref2VAPrompt(body, references)
+            : compileDirectorPrompt(body);
+      const plan = { project: body.project, scene: body.scene, shot: body.shot, catalog: { projectId, sceneId, shotId }, prompt: compiledPrompt, promptCompleteness, width: body.width, height: body.height, length: planLength, seed: body.seed, directorFields: { ...body, references }, references, workflowProfile };
       const planHash = createHash('sha256').update(canonicalJson(plan)).digest('hex');
       const inserted = await c.query(`insert into jobs (id,shot_id,state,plan_hash,idempotency_key,request_hash,required_capabilities,adapter_id,plan_json,origin) values($1,$2,'awaiting_approval',$3,$4,$5,$6,$7,$8,$9) returning id,state`, [randomUUID(), shotId, planHash, idem, requestHash, {}, body.adapterId ?? 'llama.cpp', plan, body.origin ?? 'user']);
       const result = { jobId: inserted.rows[0].id, state: inserted.rows[0].state, planHash, replayed: false };

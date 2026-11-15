@@ -34,6 +34,8 @@
     "smoke:h3-refmod-profile": "node --import tsx scripts/smoke_h3_refmod_profile.mjs",
     "smoke:asset-workbench": "node scripts/smoke_asset_workbench.mjs",
     "smoke:workflow-wizard": "node scripts/smoke_workflow_wizard.mjs",
+    "smoke:workflow-import": "node --import tsx scripts/smoke_workflow_import.mjs",
+    "smoke:workflow-conversion-api": "node --import tsx scripts/smoke_workflow_conversion_api.mjs",
     "smoke:planner-api": "node --import tsx scripts/smoke_planner_api.mjs",
     "smoke:h3-preflight": "node --import tsx scripts/smoke_h3_preflight.mjs",
     "smoke:workflow-job-plan": "node --import tsx scripts/smoke_workflow_job_plan.mjs",
@@ -61,8 +63,6 @@
     "smoke:comfy-schema": "node --import tsx scripts/smoke_comfy_schema.mjs",
     "smoke:h3-references": "node --import tsx scripts/smoke_h3_references.mjs",
     "smoke:h3-binding-guard": "node --import tsx scripts/smoke_h3_binding_guard.mjs",
-    "smoke:h3-starter": "node --import tsx scripts/smoke_h3_starter.mjs",
-    "preflight:h3-starter": "node --import tsx scripts/preflight_h3_starter.mjs",
     "probe:h3-inventory": "node scripts/probe_h3_inventory.mjs",
     "backup:local": "node scripts/backup_local.mjs",
     "backup:verify": "node scripts/verify_backup.mjs",
@@ -95,7 +95,13 @@
     "smoke:workbench-catalog": "node --import tsx scripts/smoke_workbench_catalog.mjs",
     "smoke:workbench-validate-api": "node scripts/smoke_workbench_validate_api.mjs",
     "smoke:generic-job-plan": "node scripts/smoke_generic_job_plan.mjs",
-    "smoke:workbench-executor-e2e": "node --import tsx scripts/smoke_workbench_executor_e2e.mjs"
+    "smoke:workbench-executor-e2e": "node --import tsx scripts/smoke_workbench_executor_e2e.mjs",
+    "smoke:workbench-prompt": "node --import tsx scripts/smoke_workbench_prompt.mjs",
+    "smoke:local-planner": "node --import tsx scripts/smoke_local_planner.mjs",
+    "smoke:director-sessions": "node --import tsx scripts/smoke_director_sessions.mjs",
+    "smoke:cinematic": "node --import tsx scripts/smoke_cinematic_contract.mjs",
+    "smoke:minimax-director-timeline": "node --import tsx scripts/smoke_minimax_director_timeline.mjs",
+    "import:aimixer-references": "node --import tsx scripts/import_aimixer_references.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",

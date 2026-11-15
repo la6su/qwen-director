@@ -5,9 +5,12 @@ import { createAttemptRepository, createNodeRepository, createAssetStorage } fro
 import { createH3WorkflowProfile, createH3RefModWorkflowProfile } from '@qwendirector/workflow-adapters/h3-profile';
 import { preflightH3Runtime, preflightH3RefModRuntime, validateH3Workflow, validateH3RefModWorkflow } from '@qwendirector/workflow-adapters/h3-workflow';
 import { planBrief } from '@qwendirector/contracts/planner';
+import { planBriefWithLocalModel } from './local-planner.js';
 import { createWorkbenchPlan, type WorkbenchKind } from '@qwendirector/workflow-adapters/workbenches';
-import { validateWorkbenchGraph, WORKBENCH_WORKFLOW_SPECS } from '@qwendirector/workflow-adapters/workbench-catalog';
+import { validateWorkbenchGraph, validateWorkbenchRuntimeSchema, WORKBENCH_WORKFLOW_SPECS } from '@qwendirector/workflow-adapters/workbench-catalog';
 import { WORKBENCH_CONTRACTS } from '@qwendirector/workflow-adapters/workbenches';
+import { convertComfyUiWorkflowToApi } from '@qwendirector/workflow-adapters/workflow-import';
+import { validateComfyApiWorkflowSchema } from '@qwendirector/workflow-adapters/comfy-schema';
 
 type State = 'awaiting_approval' | 'queued' | 'leased' | 'succeeded' | 'cancelled';
 type Job = { id: string; shotId: string; planHash: string; requestHash: string; state: State; createdAt: string; };
@@ -69,38 +72,85 @@ app.addHook('preHandler', async (request, reply) => {
 app.get('/health', async () => ({ status: 'ok', service: 'qwendirector-api' }));
 app.get('/metrics', async (_request, reply) => { reply.type('text/plain; version=0.0.4'); return `qwendirector_http_requests_total ${metrics.requests}\nqwendirector_http_errors_total ${metrics.errors}\n`; });
 app.get('/ready', async (_request, reply) => {
-  const checks = [
-    ['comfyui', process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188/system_stats'],
-    ['llama.cpp', `${process.env.QWEN_LLAMA_URL ?? 'http://127.0.0.1:8081'}/health`],
-  ] as const;
-  const results: Array<{id:string;ok:boolean;status:number|null}> = await Promise.all(checks.map(async ([id, url]) => { try { const response = await fetch(url, { signal: AbortSignal.timeout(3000) }); return { id, ok: response.ok, status: response.status }; } catch { return { id, ok:false, status:null }; } }));
-  try { await (attempts as any).ready(); results.push({ id:'storage', ok:true, status:200 }); } catch { results.push({ id:'storage', ok:false, status:null }); }
-  const ready = results.every((item) => item.ok);
-  return reply.code(ready ? 200 : 503).send({ status: ready ? 'ready' : 'not_ready', checkedAt: new Date().toISOString(), checks: results });
+  const llmHeaders = process.env.QWEN_LLAMA_API_KEY ? { authorization: `Bearer ${process.env.QWEN_LLAMA_API_KEY}` } : undefined;
+  const checks: Array<[string, string, Record<string,string> | undefined]> = [
+    ['comfyui', `${process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188'}/system_stats`, undefined],
+    ['llama.cpp', `${process.env.QWEN_LLAMA_URL ?? 'http://127.0.0.1:8081'}/health`, llmHeaders],
+  ];
+  const results: Array<{id:string;ok:boolean;status:number|null;required:boolean}> = await Promise.all(checks.map(async ([id, url, headers]) => { try { const response = await fetch(url, { headers, signal: AbortSignal.timeout(3000) }); return { id, ok: response.ok, status: response.status, required: id === 'comfyui' }; } catch { return { id, ok:false, status:null, required: id === 'comfyui' }; } }));
+  try { await (attempts as any).ready(); results.push({ id:'storage', ok:true, status:200, required:true }); } catch { results.push({ id:'storage', ok:false, status:null, required:true }); }
+  const ready = results.filter((item) => item.required).every((item) => item.ok);
+  const degraded = results.some((item) => !item.required && !item.ok);
+  return reply.code(ready ? 200 : 503).send({ status: ready ? 'ready' : 'not_ready', degraded, checkedAt: new Date().toISOString(), checks: results });
 });
 app.get('/v1/runtime', async () => {
+  const llmHeaders = process.env.QWEN_LLAMA_API_KEY ? { authorization: `Bearer ${process.env.QWEN_LLAMA_API_KEY}` } : undefined;
   const checks = [
-    { id:'comfyui', base: process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188', paths:['/system_stats','/object_info'] },
-    { id:'llama.cpp', base: process.env.QWEN_LLAMA_URL ?? 'http://127.0.0.1:8081', paths:['/health','/v1/models'] },
+    { id:'comfyui', base: process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188', paths:['/system_stats','/object_info'] as string[], headers: undefined as Record<string,string> | undefined },
+    { id:'llama.cpp', base: process.env.QWEN_LLAMA_URL ?? 'http://127.0.0.1:8081', paths:['/health','/v1/models'] as string[], headers: llmHeaders },
   ];
-  const result = await Promise.all(checks.map(async (check) => { const started=Date.now(); let capabilities: Record<string, unknown> | undefined; const statuses=await Promise.all(check.paths.map(async (path) => { try { const response=await fetch(`${check.base}${path}`); if (check.id === 'comfyui' && path === '/object_info' && response.ok) { try { const info = await response.json() as Record<string, any>; const loraValues = info.LoraLoaderModelOnly?.input?.required?.lora_name?.[0]; const h3Loras = Array.isArray(loraValues) ? loraValues.filter((name: unknown): name is string => typeof name === 'string' && /minimax.*h3|h3.*minimax/i.test(name)) : []; capabilities = { h3: ['MiniMaxH3ReferenceToVideo','RandomNoise','SaveVideo'].every((name) => name in info), classes: ['MiniMaxH3ReferenceToVideo','RandomNoise','SaveVideo'].filter((name) => name in info), optimizationNodes: ['MiniMaxH3MemoryEfficientSageAttentionPatch','EasyCache','LazyCache','LatentUpscale','LatentUpscaleBy'].filter((name) => name in info), h3Loras }; } catch { /* health remains valid when capability payload is unavailable */ } } return {path,status:response.status,ok:response.ok}; } catch { return {path,status:null,ok:false}; } })); return {id:check.id,ok:statuses.every((item)=>item.ok),latencyMs:Date.now()-started,checks:statuses,...(capabilities ? {capabilities} : {})}; }));
+  const result = await Promise.all(checks.map(async (check) => { const started=Date.now(); let capabilities: Record<string, unknown> | undefined; const statuses=await Promise.all(check.paths.map(async (path) => { try { const response=await fetch(`${check.base}${path}`, { headers: check.headers }); if (check.id === 'comfyui' && path === '/object_info' && response.ok) { try { const info = await response.json() as Record<string, any>; const loraValues = info.LoraLoaderModelOnly?.input?.required?.lora_name?.[0]; const h3Loras = Array.isArray(loraValues) ? loraValues.filter((name: unknown): name is string => typeof name === 'string' && /minimax.*h3|h3.*minimax/i.test(name)) : []; capabilities = { h3: ['MiniMaxH3ReferenceToVideo','RandomNoise','SaveVideo'].every((name) => name in info), h3Fl2va: ['MiniMaxH3ImageToVideo','RandomNoise','SaveVideo','LoadImage'].every((name) => name in info), classes: ['MiniMaxH3ReferenceToVideo','MiniMaxH3ImageToVideo','RandomNoise','SaveVideo','LoadImage'].filter((name) => name in info), optimizationNodes: ['MiniMaxH3MemoryEfficientSageAttentionPatch','ModelAttentionBackend','MiniMaxLowVRAMAttention','EasyCache','LazyCache','LatentUpscale','LatentUpscaleBy'].filter((name) => name in info), h3Loras }; } catch { /* health remains valid when capability payload is unavailable */ } } return {path,status:response.status,ok:response.ok}; } catch { return {path,status:null,ok:false}; } })); return {id:check.id,ok:statuses.every((item)=>item.ok),latencyMs:Date.now()-started,checks:statuses,...(capabilities ? {capabilities} : {})}; }));
   let nodeSnapshot: unknown[] | undefined;
   if (nodes && 'list' in nodes) {
     try { nodeSnapshot = await (nodes as any).list(); } catch { nodeSnapshot = undefined; }
   }
   return { checkedAt:new Date().toISOString(), runtimes:result, ...(nodeSnapshot ? { nodes: nodeSnapshot } : {}) };
 });
-app.get('/v1/runtime/comfy-schema', async (_request, reply) => { try { const response=await fetch(`${process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188'}/object_info`); if (!response.ok) return reply.code(502).send({code:`COMFY_SCHEMA_${response.status}`}); const info=await response.json() as Record<string, unknown>; const names=['MiniMaxH3ReferenceToVideo','EmptyMiniMaxH3LatentAV','RandomNoise','SaveVideo','LoadImage','LoadAudio']; return { source:'comfyui/object_info', classes:Object.fromEntries(names.filter((name)=>name in info).map((name)=>[name,info[name]])) }; } catch { return reply.code(503).send({code:'COMFY_SCHEMA_UNAVAILABLE'}); } });
+app.get('/v1/runtime/comfy-schema', async (_request, reply) => { try { const response=await fetch(`${process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188'}/object_info`); if (!response.ok) return reply.code(502).send({code:`COMFY_SCHEMA_${response.status}`}); const info=await response.json() as Record<string, unknown>; const names=['MiniMaxH3ReferenceToVideo','MiniMaxH3ImageToVideo','EmptyMiniMaxH3LatentAV','RandomNoise','SaveVideo','LoadImage','LoadAudio']; return { source:'comfyui/object_info', classes:Object.fromEntries(names.filter((name)=>name in info).map((name)=>[name,info[name]])) }; } catch { return reply.code(503).send({code:'COMFY_SCHEMA_UNAVAILABLE'}); } });
+app.post<{ Body: { workflow: unknown } }>('/v1/workflows/convert', async (request, reply) => {
+  try {
+    if (!request.body?.workflow) return reply.code(400).send({ code: 'WORKFLOW_REQUIRED' });
+    const response = await fetch(`${process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188'}/object_info`, { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return reply.code(502).send({ code: `COMFY_SCHEMA_${response.status}` });
+    const schema = await response.json() as Record<string, any>;
+    const graph = convertComfyUiWorkflowToApi(request.body.workflow, schema);
+    const validated = validateComfyApiWorkflowSchema(graph, schema);
+    return { graph, classes: validated.classes, nodes: validated.nodes };
+  } catch (error) { return reply.code(400).send({ code: (error as Error).message }); }
+});
 app.get('/v1/workflow-profiles', async (_request, reply) => { if (!('listWorkflowProfiles' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); return { profiles: await (attempts as any).listWorkflowProfiles() }; });
+app.get('/v1/workflow-profiles/catalog', async (_request, reply) => { if (!('listWorkflowProfileCatalog' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); return { profiles: await (attempts as any).listWorkflowProfileCatalog() }; });
 app.get<{ Params:{id:string} }>('/v1/workflow-profiles/:id', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); return profile ?? reply.code(404).send({code:'NOT_FOUND'}); });
-app.post<{ Body: { id:string; name:string; graph:Record<string, any>; referenceBindings?: {mode?:'refmod-i2v';imageNodeIds?:string[];audioNodeIds?:string[]} } }>('/v1/workflow-profiles', async (request, reply) => { if (!('saveWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); try { const body=request.body; const profile=body.referenceBindings?.mode === 'refmod-i2v' ? createH3RefModWorkflowProfile(body.id,body.name,body.graph,body.referenceBindings) : createH3WorkflowProfile(body.id,body.name,body.graph,body.referenceBindings); return reply.code(201).send(await (attempts as any).saveWorkflowProfile(profile)); } catch (e) { return reply.code(400).send({code:(e as Error).message}); } });
-app.post<{ Params:{id:string} }>('/v1/workflow-profiles/:id/preflight', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const refmod=profile.reference_bindings?.mode === 'refmod-i2v'; const boundary=refmod ? validateH3RefModWorkflow(profile.graph,profile.reference_bindings) : validateH3Workflow(profile.graph); const runtime=refmod ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188',profile.graph,boundary as ReturnType<typeof validateH3RefModWorkflow>) : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188', profile.graph); const activated=await (attempts as any).activateWorkflowProfile(profile.id); return {profileId:profile.id,graphHash:profile.graph_hash,boundary,runtime,revision:profile.revision,active:activated?.active === true}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
-app.post<{ Params:{id:string} }>('/v1/workflow-profiles/:id/test', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const refmod=profile.reference_bindings?.mode === 'refmod-i2v'; const boundary=refmod ? validateH3RefModWorkflow(profile.graph,profile.reference_bindings) : validateH3Workflow(profile.graph); const runtime=refmod ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188',profile.graph,boundary as ReturnType<typeof validateH3RefModWorkflow>) : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188', profile.graph); return {profileId:profile.id,graphHash:profile.graph_hash,boundary,runtime,revision:profile.revision,active:profile.active === true,tested:true}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
+app.post<{ Body: { id:string; name:string; graph:Record<string, any>; referenceBindings?: {mode?:'refmod-i2v'|'fl2va-i2v';imageNodeIds?:string[];audioNodeIds?:string[];videoNodeIds?:string[]} } }>('/v1/workflow-profiles', async (request, reply) => { if (!('saveWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); try { const body=request.body; const profile=body.referenceBindings?.mode === 'refmod-i2v' ? createH3RefModWorkflowProfile(body.id,body.name,body.graph,body.referenceBindings) : createH3WorkflowProfile(body.id,body.name,body.graph,body.referenceBindings); return reply.code(201).send(await (attempts as any).saveWorkflowProfile(profile)); } catch (e) { return reply.code(400).send({code:(e as Error).message}); } });
+app.post<{ Params:{id:string} }>('/v1/workflow-profiles/:id/preflight', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const refmod=profile.reference_bindings?.mode === 'refmod-i2v'; const boundary=refmod ? validateH3RefModWorkflow(profile.graph,profile.reference_bindings) : validateH3Workflow(profile.graph); const runtime=refmod ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188',profile.graph,boundary as ReturnType<typeof validateH3RefModWorkflow>) : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188', profile.graph); return {profileId:profile.id,graphHash:profile.graph_hash,boundary,runtime,revision:profile.revision,active:profile.active === true,tested:true}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
+app.post<{ Params:{id:string} }>('/v1/workflow-profiles/:id/test', async (request, reply) => { if (!('getWorkflowProfile' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const refmod=profile.reference_bindings?.mode === 'refmod-i2v'; const boundary=refmod ? validateH3RefModWorkflow(profile.graph,profile.reference_bindings) : validateH3Workflow(profile.graph); const runtime=refmod ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188',profile.graph,boundary as ReturnType<typeof validateH3RefModWorkflow>) : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188', profile.graph); return {profileId:profile.id,graphHash:profile.graph_hash,boundary,runtime,revision:profile.revision,active:profile.active === true,tested:true}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
 app.get<{ Params:{id:string} }>('/v1/workflow-profiles/:id/revisions', async (request, reply) => { if (!('listWorkflowProfileRevisions' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); return { profileId:request.params.id, revisions:await (attempts as any).listWorkflowProfileRevisions(request.params.id) }; });
-app.post<{ Params:{id:string;revision:string} }>('/v1/workflow-profiles/:id/revisions/:revision/activate', async (request, reply) => { if (!('activateWorkflowProfileRevision' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'}); const revision=Number(request.params.revision); if (!Number.isSafeInteger(revision) || revision < 1) return reply.code(400).send({code:'INVALID_REVISION'}); const profile=await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({code:'NOT_FOUND'}); try { const revisionRow=(await (attempts as any).listWorkflowProfileRevisions(request.params.id)).find((item:any)=>Number(item.revision)===revision); const graph=revisionRow?.graph ?? {}; validateH3Workflow(graph); const activated=await (attempts as any).activateWorkflowProfileRevision(request.params.id,revision); if (!activated) return reply.code(404).send({code:'REVISION_NOT_FOUND'}); const derived=createH3WorkflowProfile(request.params.id,profile.name,graph,activated.reference_bindings); return {profileId:request.params.id,revision,active:true,graphHash:activated.graph_hash,qualityHint:derived.qualityHint,samplingSteps:derived.samplingSteps,loras:derived.loras}; } catch (e) { return reply.code(409).send({code:(e as Error).message}); } });
+app.post<{ Params:{id:string;revision:string} }>('/v1/workflow-profiles/:id/revisions/:revision/activate', async (request, reply) => {
+  if (!('activateWorkflowProfileRevision' in attempts)) return reply.code(501).send({code:'WORKFLOW_PROFILE_STORAGE_UNAVAILABLE'});
+  const revision=Number(request.params.revision);
+  if (!Number.isSafeInteger(revision) || revision < 1) return reply.code(400).send({code:'INVALID_REVISION'});
+  const profile=await (attempts as any).getWorkflowProfile(request.params.id);
+  if (!profile) return reply.code(404).send({code:'NOT_FOUND'});
+  try {
+    const revisionRow=(await (attempts as any).listWorkflowProfileRevisions(request.params.id)).find((item:any)=>Number(item.revision)===revision);
+    if (!revisionRow) return reply.code(404).send({code:'REVISION_NOT_FOUND'});
+    const graph=revisionRow.graph;
+    const bindings=revisionRow.reference_bindings ?? profile.reference_bindings ?? {};
+    const refmod=bindings.mode==='refmod-i2v';
+    const boundary=refmod ? validateH3RefModWorkflow(graph,bindings) : validateH3Workflow(graph);
+    const runtime=refmod
+      ? await preflightH3RefModRuntime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188',graph,boundary as ReturnType<typeof validateH3RefModWorkflow>)
+      : await preflightH3Runtime(process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188',graph);
+    const activated=await (attempts as any).activateWorkflowProfileRevision(request.params.id,revision);
+    if (!activated) return reply.code(404).send({code:'REVISION_NOT_FOUND'});
+    const derived=refmod ? createH3RefModWorkflowProfile(request.params.id,profile.name,graph,bindings) : createH3WorkflowProfile(request.params.id,profile.name,graph,bindings);
+    return {profileId:request.params.id,revision,active:true,graphHash:activated.graph_hash,boundary,runtime,qualityHint:derived.qualityHint,samplingSteps:derived.samplingSteps,loras:derived.loras};
+  } catch (e) { return reply.code(409).send({code:(e as Error).message}); }
+});
 app.get('/v1/projects', async (_request, reply) => { if (!('listProjects' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); return { projects: await (attempts as any).listProjects() }; });
 app.post<{ Body:{name:string} }>('/v1/projects', async (request, reply) => { if (!('createProject' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); try { return reply.code(201).send(await (attempts as any).createProject(request.body?.name)); } catch (e) { return reply.code(400).send({code:(e as Error).message}); } });
 app.post<{ Params:{projectId:string}; Body:{title:string} }>('/v1/projects/:projectId/scenes', async (request, reply) => { if (!('createScene' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); try { return reply.code(201).send(await (attempts as any).createScene(request.params.projectId,request.body?.title)); } catch (e) { const code=(e as Error).message; return reply.code(code==='PROJECT_NOT_FOUND'?404:400).send({code}); } });
+app.post<{ Params:{sceneId:string}; Body:{timeline:unknown;assetVersionByMediaKey:Record<string,string>} }>('/v1/scenes/:sceneId/aimixer/import', async (request, reply) => {
+  if (!('importMiniMaxDirectorTimeline' in attempts)) return reply.code(501).send({code:'AIMIXER_IMPORT_STORAGE_UNAVAILABLE'});
+  try {
+    const result = await (attempts as any).importMiniMaxDirectorTimeline(request.params.sceneId, request.body?.timeline, request.body?.assetVersionByMediaKey);
+    return reply.code(result.replayed ? 200 : 201).send({ ...result, status:'draft', requiresManualJobReview:true });
+  } catch (error) {
+    const code = (error as Error).message;
+    const status = code === 'SCENE_NOT_FOUND' ? 404 : code === 'AIMIXER_IMPORT_MAPPING_CONFLICT' ? 409 : 400;
+    return reply.code(status).send({code});
+  }
+});
 app.patch<{ Params:{projectId:string}; Body:{sceneIds:string[]} }>('/v1/projects/:projectId/scenes/order', async (request, reply) => { if (!('reorderScenes' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); try { return { projectId:request.params.projectId, scenes:await (attempts as any).reorderScenes(request.params.projectId,request.body?.sceneIds) }; } catch (e) { const code=(e as Error).message; return reply.code(code==='PROJECT_NOT_FOUND'?404:400).send({code}); } });
 app.post<{ Params:{sceneId:string}; Body:{title:string;durationSeconds?:number} }>('/v1/scenes/:sceneId/shots', async (request, reply) => { if (!('createShot' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); try { return reply.code(201).send(await (attempts as any).createShot(request.params.sceneId,request.body?.title,request.body?.durationSeconds)); } catch (e) { const code=(e as Error).message; return reply.code(code==='SCENE_NOT_FOUND'?404:400).send({code}); } });
 app.patch<{ Params:{sceneId:string}; Body:{shotIds:string[]} }>('/v1/scenes/:sceneId/shots/order', async (request, reply) => { if (!('reorderShots' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); try { return { sceneId:request.params.sceneId, shots:await (attempts as any).reorderShots(request.params.sceneId,request.body?.shotIds) }; } catch (e) { const code=(e as Error).message; return reply.code(code==='SCENE_NOT_FOUND'?404:400).send({code}); } });
@@ -109,7 +159,12 @@ app.patch<{ Params:{sceneId:string}; Body:{title:string} }>('/v1/scenes/:sceneId
 app.patch<{ Params:{shotId:string}; Body:{title:string;durationSeconds?:number} }>('/v1/shots/:shotId', async (request, reply) => { if (!('renameShot' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); try { return await (attempts as any).renameShot(request.params.shotId,request.body?.title,request.body?.durationSeconds); } catch (e) { const code=(e as Error).message; return reply.code(code==='SHOT_NOT_FOUND'?404:400).send({code}); } });
 app.get<{ Querystring:{state?:string} }>('/v1/jobs', async (request, reply) => { if (!('listJobs' in attempts)) return reply.code(501).send({code:'JOB_STORAGE_UNAVAILABLE'}); return { jobs:await (attempts as any).listJobs(request.query.state) }; });
 app.get<{ Params: { projectId: string } }>('/v1/projects/:projectId', async (request, reply) => { if (!('getProject' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); const project = await (attempts as any).getProject(request.params.projectId); return project ?? reply.code(404).send({code:'NOT_FOUND'}); });
-app.get<{ Params: { projectId: string } }>('/v1/projects/:projectId/export', async (request, reply) => { if (!('getProject' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); const project = await (attempts as any).getProject(request.params.projectId); if (!project) return reply.code(404).send({code:'NOT_FOUND'}); const manifest={schema_version:'1.0',project_id:project.id,project_name:project.name,created_at:project.created_at,scenes:project.scenes,jobs:project.jobs ?? []}; reply.header('content-type','application/json; charset=utf-8').header('content-disposition',`attachment; filename="qwendirector-project-${project.id}.manifest.json"`).header('cache-control','no-store'); return manifest; });
+app.post<{ Params:{projectId:string}; Body:{assetVersionId:string;role:'master_audio'|'reference'|'source_video'|'deliverable';logicalName:string;actor:string} }>('/v1/projects/:projectId/assets', async (request, reply) => {
+  if (!('attachProjectAsset' in attempts)) return reply.code(501).send({code:'ASSET_STORAGE_UNAVAILABLE'});
+  try { return await (attempts as any).attachProjectAsset(request.params.projectId,request.body?.assetVersionId,request.body?.role,request.body?.logicalName,request.body?.actor); }
+  catch (e) { const code=(e as Error).message; const status=code==='PROJECT_NOT_FOUND'||code==='ASSET_NOT_FOUND'?404:400; return reply.code(status).send({code}); }
+});
+app.get<{ Params: { projectId: string } }>('/v1/projects/:projectId/export', async (request, reply) => { if (!('getProject' in attempts)) return reply.code(501).send({code:'PROJECT_STORAGE_UNAVAILABLE'}); const project = await (attempts as any).getProject(request.params.projectId); if (!project) return reply.code(404).send({code:'NOT_FOUND'}); const manifest={schema_version:'1.0',project_id:project.id,project_name:project.name,created_at:project.created_at,scenes:project.scenes,jobs:project.jobs ?? [],assets:project.assets ?? []}; reply.header('content-type','application/json; charset=utf-8').header('content-disposition',`attachment; filename="qwendirector-project-${project.id}.manifest.json"`).header('cache-control','no-store'); return manifest; });
 app.get<{ Querystring: { projectId?: string } }>('/v1/assets', async (request, reply) => { if (!('listAssets' in attempts)) return reply.code(501).send({code:'ASSET_STORAGE_UNAVAILABLE'}); return { assets: await (attempts as any).listAssets(request.query.projectId) }; });
 app.get<{ Params: { id: string } }>('/v1/jobs/:id', async (request, reply) => {
   if ('jobs' in attempts) { const job = await (attempts as any).jobs.get(request.params.id); return job ? job : reply.code(404).send({ code: 'NOT_FOUND' }); }
@@ -141,21 +196,62 @@ app.get<{ Params: { assetVersionId: string } }>('/v1/assets/:assetVersionId', as
 });
 app.get<{ Params: { assetVersionId: string } }>('/v1/assets/:assetVersionId/lineage', async (request, reply) => { if (!('getAssetLineage' in attempts)) return reply.code(501).send({code:'ASSET_STORAGE_UNAVAILABLE'}); const lineage = await (attempts as any).getAssetLineage(request.params.assetVersionId); if (!lineage) return reply.code(404).send({code:'NOT_FOUND'}); return lineage; });
 app.post<{ Body: { logicalName:string; sha256:string; mimeType:string; contentBase64:string; actor:string; assetKind?:string; tags?:string[]; derivedFromAssetVersionIds?:string[] } }>('/v1/assets/import', async (request, reply) => { if (!('importAsset' in attempts)) return reply.code(501).send({code:'ASSET_STORAGE_UNAVAILABLE'}); try { const b=request.body; const bytes=Buffer.from(b.contentBase64 ?? '', 'base64'); const maxBytes=Number(process.env.QWEN_MAX_IMPORT_BYTES ?? 104857600); if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || bytes.length > maxBytes) throw new Error('ASSET_IMPORT_TOO_LARGE'); if (!b.logicalName || !b.sha256 || !b.mimeType || !b.actor || !bytes.length) throw new Error('INVALID_ASSET_IMPORT'); return reply.code(201).send(await (attempts as any).importAsset(b.logicalName,bytes,b.sha256,b.mimeType,b.actor,assetStorage,b.assetKind,b.tags,b.derivedFromAssetVersionIds)); } catch(e) { const code=(e as Error).message; return reply.code(code==='INVALID_ASSET_IMPORT'||code==='INVALID_ASSET_METADATA'||code==='LINEAGE_PARENT_NOT_FOUND'||code==='ASSET_IMPORT_TOO_LARGE'||code==='SHA256_MISMATCH'?400:500).send({code}); } });
-app.post<{ Body: { project: string; scene: string; shot: string; projectId?:string; sceneId?:string; shotId?:string; prompt?: string; camera?: string; action?: string; composition?: string; lighting?: string; sound?: string; transition?: string; adapterId?: string; workflow?: Record<string, any>; workflowProfileId?: string; workflowProfileName?: string; workflowReferenceBindings?: { imageNodeIds?: string[]; audioNodeIds?: string[] }; references?: Array<{ assetVersionId:string; filename:string; type?:'image'|'audio'; role?:'picture'|'actor'|'set'|'prop'|'audio' }>; width?: number; height?: number; length?: number; seed?: number } }>('/v1/director/jobs', async (request, reply) => {
+app.post<{ Body: { project: string; scene: string; shot: string; projectId?:string; sceneId?:string; shotId?:string; prompt?: string; camera?: string; action?: string; composition?: string; lighting?: string; sound?: string; transition?: string; adapterId?: string; workflow?: Record<string, any>; workflowProfileId?: string; workflowProfileName?: string; workflowReferenceBindings?: { mode?: 'fl2va-i2v'|'refmod-i2v'; imageNodeIds?: string[]; audioNodeIds?: string[]; videoNodeIds?: string[]; workbenchKind?: WorkbenchKind; outputBindings?: Record<string,string> }; references?: Array<{ assetVersionId:string; filename:string; type?:'image'|'audio'|'video'; role?:'picture'|'actor'|'set'|'prop'|'layout'|'first-frame'|'last-frame'|'audio'|'video' }>; width?: number; height?: number; length?: number; seed?: number } }>('/v1/director/jobs', async (request, reply) => {
   const body = request.body;
   if (!body?.project?.trim() || !body.scene?.trim() || !body.shot?.trim() || ![body.prompt,body.camera,body.action,body.composition,body.lighting,body.sound,body.transition].some((value) => value?.trim())) return reply.code(400).send({ code: 'INVALID_INPUT' });
   const shotId = randomUUID();
   const planHash = `plan:${shotId}`;
   const requestHash = `request:${shotId}`;
   const idempotencyKey = `director:${shotId}`;
-  if ('jobs' in attempts) { try { const result = await (attempts as any).jobs.createDirector(body); return reply.code(201).send({ ...result, project: body.project, scene: body.scene, shot: body.shot }); } catch (error) { const code = (error as Error).message; return reply.code(code === 'JOB_QUOTA_EXCEEDED' ? 429 : code === 'CATALOG_REFERENCE_NOT_FOUND' ? 404 : code === 'IDEMPOTENCY_CONFLICT' ? 409 : code === 'INVALID_WORKFLOW_PLAN' || code === 'EMPTY_DIRECTOR_PROMPT' || code === 'WORKFLOW_PROFILE_NOT_ACTIVE' || code === 'REFERENCE_ASSET_NOT_FOUND' || code === 'REFERENCE_MIME_MISMATCH' || code === 'INVALID_REFERENCE_PLAN' || code === 'INVALID_REFERENCE_ROLE' || code === 'INCOMPLETE_CATALOG_REFERENCE' || code.startsWith('H3_WORKFLOW_') ? 400 : 500).send({ code }); } }
+  if ('jobs' in attempts) { try { const result = await (attempts as any).jobs.createDirector(body); return reply.code(201).send({ ...result, project: body.project, scene: body.scene, shot: body.shot }); } catch (error) { const code = (error as Error).message; return reply.code(code === 'JOB_QUOTA_EXCEEDED' ? 429 : code === 'CATALOG_REFERENCE_NOT_FOUND' ? 404 : code === 'IDEMPOTENCY_CONFLICT' ? 409 : code === 'INVALID_WORKFLOW_PLAN' || code === 'EMPTY_DIRECTOR_PROMPT' || code === 'WORKFLOW_PROFILE_NOT_ACTIVE' || code === 'REFERENCE_ASSET_NOT_FOUND' || code === 'REFERENCE_MIME_MISMATCH' || code === 'INVALID_REFERENCE_PLAN' || code === 'INVALID_REFERENCE_ROLE' || code === 'INCOMPLETE_CATALOG_REFERENCE' || code === 'WORKBENCH_REFERENCE_MEDIA_UNSUPPORTED' || code === 'H3_REFMOD_REFERENCE_MEDIA_UNSUPPORTED' || code === 'IMAGE_EDIT_SAMPLER_MUST_USE_REFERENCE_LATENT' || code.startsWith('H3_WORKFLOW_') || code.startsWith('H3_VEDA_') || code.startsWith('H3_FL2VA_') || code.startsWith('UNSUPPORTED_VEDA_') || code.startsWith('INVALID_VEDA_') || code === 'INVALID_FL2VA_H3_LENGTH' ? 400 : 500).send({ code }); } }
   const job: Job = { id: randomUUID(), shotId, planHash, requestHash, state: 'awaiting_approval', createdAt: new Date().toISOString() };
   jobs.set(job.id, job);
   return reply.code(201).send({ jobId: job.id, shotId, state: job.state, project: body.project, scene: body.scene, shot: body.shot });
 });
 app.post<{ Body: { nodeId?: string; instanceId: string; capabilities: Record<string, unknown> } }>('/v1/nodes/register', async (request, reply) => { if (!nodes) return reply.code(501).send({ code:'NODE_STORAGE_UNAVAILABLE' }); try { return await nodes.register(request.body); } catch (e) { return reply.code(409).send({ code:(e as Error).message }); } });
 app.get('/v1/nodes', async (_request, reply) => { if (!nodes || !('list' in nodes)) return reply.code(501).send({ code:'NODE_STORAGE_UNAVAILABLE' }); return { nodes: await (nodes as any).list() }; });
-app.post<{ Body: { prompt:string; camera?:string; action?:string; composition?:string; lighting?:string; sound?:string; transition?:string; model?:string } }>('/v1/planner/plan', async (request, reply) => { if (!request.body?.prompt?.trim()) return reply.code(400).send({ code:'PLANNER_PROMPT_REQUIRED' }); return planBrief(request.body, request.body.model ?? 'local-planner'); });
+app.post<{ Body: { prompt:string; camera?:string; action?:string; composition?:string; lighting?:string; sound?:string; music?:string; transition?:string; model?:string } }>('/v1/planner/plan', async (request, reply) => { if (typeof request.body?.prompt !== 'string' || !request.body.prompt.trim()) return reply.code(400).send({ code:'PLANNER_PROMPT_REQUIRED' }); return planBrief(request.body, request.body.model ?? 'local-planner'); });
+app.post<{ Body: { projectId?:string } }>('/v1/planner/sessions', async (request, reply) => {
+  if (!('createDirectorSession' in attempts)) return reply.code(501).send({ code:'DIRECTOR_SESSION_STORAGE_REQUIRED' });
+  try {
+    if (request.body?.projectId && 'getProject' in attempts && !(await (attempts as any).getProject(request.body.projectId))) return reply.code(404).send({ code:'PROJECT_NOT_FOUND' });
+    return reply.code(201).send(await (attempts as any).createDirectorSession(request.body?.projectId));
+  } catch { return reply.code(500).send({ code:'DIRECTOR_SESSION_STORAGE_FAILED' }); }
+});
+app.get<{ Params:{id:string} }>('/v1/planner/sessions/:id', async (request, reply) => {
+  if (!('getDirectorSession' in attempts)) return reply.code(501).send({ code:'DIRECTOR_SESSION_STORAGE_REQUIRED' });
+  const session = await (attempts as any).getDirectorSession(request.params.id);
+  return session ? session : reply.code(404).send({ code:'DIRECTOR_SESSION_NOT_FOUND' });
+});
+app.post<{ Body: { prompt:string; camera?:string; action?:string; composition?:string; lighting?:string; sound?:string; music?:string; transition?:string; model?:string; sessionId?:string; message?:string } }>('/v1/planner/assist', async (request, reply) => {
+  if (typeof request.body?.prompt !== 'string' || !request.body.prompt.trim()) return reply.code(400).send({ code:'PLANNER_PROMPT_REQUIRED' });
+  try {
+    const body = request.body;
+    if (body.message !== undefined && (typeof body.message !== 'string' || body.message.length > 3000)) return reply.code(400).send({code:'PLANNER_MESSAGE_INVALID'});
+    let session: any = null;
+    if (body.sessionId) {
+      if (!('getDirectorSession' in attempts) || !('appendDirectorSessionExchange' in attempts)) return reply.code(501).send({ code:'DIRECTOR_SESSION_STORAGE_REQUIRED' });
+      session = await (attempts as any).getDirectorSession(body.sessionId);
+      if (!session) return reply.code(404).send({ code:'DIRECTOR_SESSION_NOT_FOUND' });
+    }
+    let project: unknown; let workflows: unknown;
+    if (session?.project_id && 'getProject' in attempts) {
+      const catalog = await (attempts as any).getProject(session.project_id);
+      project = catalog ? { id:catalog.id, name:catalog.name, scenes:(catalog.scenes ?? []).slice(0,5).map((scene:any)=>({title:scene.title,shots:(scene.shots ?? []).slice(0,8).map((shot:any)=>({title:shot.title,durationSeconds:shot.durationSeconds,prompt:JSON.stringify(shot.prompt ?? {}).slice(0,300)}))})) } : undefined;
+      if ('listWorkflowProfiles' in attempts) workflows = (await (attempts as any).listWorkflowProfiles()).slice(0,10).map((profile:any)=>({id:profile.id,name:profile.name,graphHash:profile.graph_hash,modelStack:profile.model_stack,qualityHint:profile.quality_hint,boundary:profile.boundary}));
+    }
+    const history = (session?.turns ?? []).filter((turn:any)=>turn.role === 'user' || turn.role === 'assistant').map((turn:any)=>({role:turn.role,content:String(turn.content).slice(0,12000)}));
+    const requestText = body.message?.trim() || 'Составь shot plan по текущему брифу.';
+    const decision = await planBriefWithLocalModel(body, body.model, { history, project, workflows, request:requestText, toolNames:project ? ['read_selected_project','list_active_workflows'] : [] });
+    const result = { ...decision, provenance:{ ...decision.provenance, toolsUsed:project ? ['list_active_workflows','read_selected_project'] : [] } };
+    if (session) {
+      try { await (attempts as any).appendDirectorSessionExchange(session.id, Number(session.version), requestText, JSON.stringify(result.sections), result.provenance); }
+      catch (error) { if ((error as Error).message === 'DIRECTOR_SESSION_VERSION_CONFLICT') return reply.code(409).send({code:'DIRECTOR_SESSION_VERSION_CONFLICT'}); throw error; }
+    }
+    return result;
+  }
+  catch (error) { const code=(error as Error).message; const unavailable=code==='PLANNER_LOCAL_MODEL_UNAVAILABLE'||code.startsWith('PLANNER_MODEL_LIST_'); return reply.code(code==='PLANNER_INPUT_INVALID' ? 400 : unavailable ? 503 : 502).send({code: /^PLANNER_[A-Z0-9_]+$/.test(code) ? code : 'PLANNER_LOCAL_MODEL_FAILED'}); }
+});
 app.post<{ Body: { kind: WorkbenchKind; inputs: Record<string, unknown>; workflowDigest: string } }>('/v1/workbenches/plan', async (request, reply) => {
   try {
     const body = request.body;
@@ -164,20 +260,20 @@ app.post<{ Body: { kind: WorkbenchKind; inputs: Record<string, unknown>; workflo
   } catch (error) { return reply.code(400).send({ code: (error as Error).message }); }
 });
 app.get('/v1/workbenches/catalog', async () => ({ workbenches: WORKBENCH_CONTRACTS.map((contract) => ({ ...contract, workflow: WORKBENCH_WORKFLOW_SPECS[contract.kind] })) }));
-app.post<{ Body: { kind: WorkbenchKind; graph: Record<string, any>; expectedDigest?: string } }>('/v1/workbenches/validate', async (request, reply) => {
+app.post<{ Body: { kind: WorkbenchKind; graph: Record<string, any>; expectedDigest?: string; outputBindings?: Record<string,string> } }>('/v1/workbenches/validate', async (request, reply) => {
   try {
     const body = request.body;
     if (!body?.kind || !body.graph) return reply.code(400).send({ code: 'WORKBENCH_GRAPH_REQUIRED' });
-    const validation = validateWorkbenchGraph(body.kind, body.graph, body.expectedDigest);
+    const validation = validateWorkbenchGraph(body.kind, body.graph, body.expectedDigest, body.outputBindings);
     return { kind: body.kind, ...validation, accepted: true };
   } catch (error) { return reply.code(400).send({ code: (error as Error).message }); }
 });
-app.post<{ Body: { id: string; name: string; kind: WorkbenchKind; graph: Record<string, any>; expectedDigest?: string } }>('/v1/workbenches/profiles', async (request, reply) => {
+app.post<{ Body: { id: string; name: string; kind: WorkbenchKind; graph: Record<string, any>; expectedDigest?: string; outputBindings?: Record<string,string> } }>('/v1/workbenches/profiles', async (request, reply) => {
   if (!('saveWorkbenchProfile' in attempts)) return reply.code(501).send({ code: 'WORKBENCH_PROFILE_STORAGE_UNAVAILABLE' });
   try {
     const body = request.body; if (!body?.id || !body.name || !body.kind || !body.graph) return reply.code(400).send({ code: 'WORKBENCH_PROFILE_REQUIRED' });
-    const validation = validateWorkbenchGraph(body.kind, body.graph, body.expectedDigest);
-    return reply.code(201).send(await (attempts as any).saveWorkbenchProfile({ id: body.id, name: body.name, kind: body.kind, graph: body.graph, graphHash: validation.digest, boundary: { classes: validation.classes } }));
+    const validation = validateWorkbenchGraph(body.kind, body.graph, body.expectedDigest, body.outputBindings);
+    return reply.code(201).send(await (attempts as any).saveWorkbenchProfile({ id: body.id, name: body.name, kind: body.kind, graph: body.graph, graphHash: validation.digest, boundary: { classes: validation.classes, outputBindings: validation.outputBindings } }));
   } catch (error) { return reply.code(400).send({ code: (error as Error).message }); }
 });
 app.post<{ Params: { id: string } }>('/v1/workbenches/profiles/:id/test', async (request, reply) => {
@@ -185,12 +281,12 @@ app.post<{ Params: { id: string } }>('/v1/workbenches/profiles/:id/test', async 
   const profile = await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({ code: 'NOT_FOUND' });
   try {
     const kind = profile.reference_bindings?.workbenchKind as WorkbenchKind | undefined; if (!kind) throw new Error('WORKBENCH_KIND_MISSING');
-    const validation = validateWorkbenchGraph(kind, profile.graph, profile.graph_hash);
-    const response = await fetch(`${process.env.COMFYUI_URL ?? 'http://192.168.10.103:8188'}/object_info`);
+    const validation = validateWorkbenchGraph(kind, profile.graph, profile.graph_hash, profile.boundary?.outputBindings);
+    const response = await fetch(`${process.env.COMFYUI_URL ?? 'http://127.0.0.1:8188'}/object_info`);
     if (!response.ok) throw new Error(`COMFY_SCHEMA_${response.status}`);
     const info = await response.json() as Record<string, unknown>;
-    const missing = ['LoadImage', 'SaveImage'].filter((name) => !(name in info)); if (missing.length) throw new Error(`WORKBENCH_RUNTIME_CLASSES_MISSING:${missing.join(',')}`);
-    return { profileId: profile.id, kind, graphHash: validation.digest, runtime: { reachable: true, classes: ['LoadImage', 'SaveImage'] }, tested: true, active: profile.active === true };
+    const runtime = validateWorkbenchRuntimeSchema(profile.graph, info);
+    return { profileId: profile.id, kind, graphHash: validation.digest, runtime: { reachable: true, ...runtime }, tested: true, active: profile.active === true };
   } catch (error) { return reply.code(409).send({ code: (error as Error).message }); }
 });
 app.post<{ Params: { id: string } }>('/v1/workbenches/profiles/:id/activate', async (request, reply) => {
@@ -198,7 +294,7 @@ app.post<{ Params: { id: string } }>('/v1/workbenches/profiles/:id/activate', as
   const profile = await (attempts as any).getWorkflowProfile(request.params.id); if (!profile) return reply.code(404).send({ code: 'NOT_FOUND' });
   try {
     const kind = profile.reference_bindings?.workbenchKind as WorkbenchKind | undefined; if (!kind) throw new Error('WORKBENCH_KIND_MISSING');
-    validateWorkbenchGraph(kind, profile.graph, profile.graph_hash);
+    validateWorkbenchGraph(kind, profile.graph, profile.graph_hash, profile.boundary?.outputBindings);
     const activated = await (attempts as any).activateWorkflowProfile(profile.id); return { profileId: profile.id, kind, active: activated?.active === true, graphHash: profile.graph_hash };
   } catch (error) { return reply.code(409).send({ code: (error as Error).message }); }
 });

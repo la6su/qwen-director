@@ -33,6 +33,8 @@ Domain ничего не знает о Fastify, файловых путях и C
 
 После успешной fencing-проверки API сохраняет неизменяемый JSON manifest attempt вместе с SHA-256 его канонического представления в той же транзакции, что перевод Job в `succeeded`. Это фиксирует provenance до появления blob upload. `AssetVersion` создаётся только после staging, проверки hash и atomic promotion в content-addressed storage; manifest со staging descriptor сам по себе не считается ассетом.
 
+Исходники проекта связываются с `AssetVersion` отдельно от shot references и результатов attempts. `project_assets` хранит роль, логическое имя, автора связи и время; такой master asset, как саундтрек, принадлежит проекту целиком и не притворяется входом каждого видеошота. Байты остаются неизменяемыми в CAS, а связь хранит назначение исходника в каталоге.
+
 ## Исполнение
 
 ```mermaid
@@ -78,6 +80,8 @@ Cancel: сохраняется durable intent; worker вызывает адре�
 ### H3 RefMod workflow
 
 Для локального H3 I2V используется отдельный `refmod-i2v` boundary. Immutable profile закрепляет graph/hash, два RefMod names (vehicle и actor) и image-node bindings; job отдельно фиксирует исходные AssetVersion references, в том числе окружение и происхождение RefMod source sheets. Worker загружает парковочные кадры в ComfyUI, подставляет только `LoadImage` inputs и не заменяет ими tensor links `first_frame`/`last_frame`. Live preflight проверяет классы и RefMod inventory; создание job, ручное approval, leases, fencing и CAS commit остаются в общей очереди.
+
+Прямой H3 First/Last Frame использует отдельный `fl2va-i2v` profile boundary без RefMod и Ref2VA LoRA. Профиль фиксирует две разные `LoadImage` ноды в порядке first/last; job обязан связать с ними два явно помеченных AssetVersion. Worker загружает и маршрутизирует кадры по ролям, а не по порядку списка; compiler добавляет точное временное выравнивание FL2VA в immutable prompt. Это остаётся обычной ComfyUI generation job с ручным approval и общей durable lifecycle.
 
 ## Multi-node с первого дня
 
