@@ -2,7 +2,7 @@ export type AttemptContext = { jobId: string; attemptId: string; fencingToken: n
 export type Receipt = { externalRunId: string; [key: string]: unknown };
 export type PollResult = { state: 'running'|'succeeded'|'failed'; progress?: number; error?: string };
 export interface ExecutionAdapter { prepare(ctx: AttemptContext): Promise<void>; submit(ctx: AttemptContext): Promise<Receipt>; poll(receipt: Receipt, signal?: AbortSignal): Promise<PollResult>; collect(receipt: Receipt): Promise<unknown>; cancel?(receipt: Receipt): Promise<void>; }
-export interface ExecutionHooks { heartbeat(ctx: AttemptContext, sequence: number): Promise<void>; commit(ctx: AttemptContext, output: unknown): Promise<void>; fail(ctx: AttemptContext, error: unknown): Promise<void>; }
+export interface ExecutionHooks { heartbeat(ctx: AttemptContext, sequence: number): Promise<void>; commit(ctx: AttemptContext, output: unknown): Promise<void>; fail(ctx: AttemptContext, error: unknown): Promise<void>; unknown?(ctx: AttemptContext, error: unknown): Promise<void>; }
 
 export async function execute(ctx: AttemptContext, adapter: ExecutionAdapter, hooks: ExecutionHooks, signal?: AbortSignal): Promise<void> {
   let receipt: Receipt | undefined;
@@ -17,5 +17,12 @@ export async function execute(ctx: AttemptContext, adapter: ExecutionAdapter, ho
       if (status.state === 'failed') throw new Error(status.error || 'BACKEND_FAILED');
       if (status.state === 'succeeded') { const output = await adapter.collect(receipt); await hooks.commit(ctx, output); return; }
     }
-  } catch (error) { if ((error as Error).message === 'CANCELLED' && receipt && adapter.cancel) await adapter.cancel(receipt).catch(() => undefined); await hooks.fail(ctx, error); throw error; }
+  } catch (error) {
+    if ((error as Error).message === 'CANCELLED' && receipt && adapter.cancel) await adapter.cancel(receipt).catch(() => undefined);
+    if ((error as { code?: string })?.code === 'EXTERNAL_SUBMIT_UNKNOWN') {
+      try { await hooks.unknown?.(ctx, error); }
+      catch (recordError) { console.error(`[worker] could not persist unknown submit state: ${recordError instanceof Error ? recordError.message : String(recordError)}`); }
+    } else await hooks.fail(ctx, error);
+    throw error;
+  }
 }

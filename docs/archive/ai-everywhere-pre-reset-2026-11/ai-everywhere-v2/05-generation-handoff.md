@@ -1,6 +1,6 @@
 # AI Everywhere v2 — generation handoff (plan only)
 
-Версия: 0.1 · Статус: `PLAN ONLY / BLOCKED UNTIL CREATIVE APPROVAL` · Дата: 2026-11-15
+Версия: 0.2 · Статус: `PLAN ONLY / BLOCKED UNTIL CREATIVE APPROVAL` · Дата: 2026-11-15
 Источники: `01-song-beat-map.md`, `02-director-treatment.md`, `03-storyboard-shot-bible.md`, v22 provenance, local Qwen/H3 skill guides.
 Утверждено: существующие opening images остаются starting material; master track и v22 immutable.
 Непроверено: выбранный сценарий/кадры, точные вокальные cutpoints, provider capabilities для каждого конкретного graph, необходимость новых assets.
@@ -22,6 +22,20 @@
 | K05 | Bridge decision close frame | `AE2-S023…026`, `AE-B019…020` | Реальный предмет + лицо героя + один неподвижный выбранный кадр. Содержательная точка тишины и форма для match cut. | Face RefMod `973e1f6f…`, room/workstation photo. Крупное лицо отдельным ref; не ставить сложный lip sync. |
 | K06 | Final synthesis frame | `AE2-S027…031`, `AE-B021` | Композиционно собрать только ранее выбранные мотивы и вернуть линию/рамку к монитору. Это не новый город и не максимизация частиц. | Existing `AE-048/052` candidates; проверить наследование формы от K03/K05. |
 | K07 | Completed room outro frame | `AE2-S032…033`, Outro | Реальная комната и тот же fixed workstation показывают готовое изображение на экране; герой прекращает работу. | `photo-room.jpeg`, `photo-monitors.jpeg`, current shot 58. Удержать последний кадр; no new effect after song. |
+
+## Доказательство диапазона без разрозненных демонстраций
+
+Будущий re-edit сначала отбирает по одному лучшему существующему take на функцию, а затем проверяет, что эти планы причинно входят в историю выбора:
+
+| Порядок в истории | Existing shot family | Demonstrated craft | Условие включения |
+|---|---|---|---|
+| Verse 1: проверка масштаба | `AE2-S007…008`, `AE-B008…009`; car source `81e70d3f…`, chrome `e223ab24…` | Направленная объектная анимация, низкий tracking, предметная деталь | Один автомобильный take, чистый L→R motion, короткий match по отражению; почти дублирующий ракурс исключить. |
+| Chorus 1: награда выбора | `AE2-S011…016`, `AE-B013…015`; ring/labyrinth/spires candidates | Worldbuilding, композиционная глубина, осмысленная смена крупности и камера | Оставить один географически читаемый мир; каждый следующий план открывает новую часть того же пространства. |
+| Verse 2: перегрузка | `AE2-S017…022`, `AE-B016…018` | Материальная трансформация, ритмическое ускорение, затем торможение | Повтор намеренно строится одинаковой точкой схода; ускорение создаётся монтажом отобранных источников, не артефактами. |
+| Bridge: решение | `AE2-S023…026`, `AE-B019…020`; face anchors in `03` | Персонажная консистентность, постановка close-up, match-cut VFX и пауза | Один проверенный face CU и тот же человек в смежном плане; переход только из выбранной рамки. |
+| Final chorus / outro: авторская сборка | `AE2-S027…033`, `AE-B021…022` | Монтаж, синтез motifs, завершение | Только ранее представленные формы, один master audio, пик движения и удержание; без нового мира после припева. |
+
+Это план отбора, не утверждение о качестве текущих кадров. Source AssetVersions в `03-storyboard-shot-bible.md` и EDL ranges в `04-v22-creative-and-edit-audit.md` остаются первичными; если полный take не доказывает нужный навык, статус — `MISSING/UNREVIEWED`.
 
 ## shot_ir and storyboard_frames
 

@@ -123,8 +123,8 @@ def local_peaks(signal: np.ndarray, sample_rate: int, hop: int) -> list[dict]:
     ]
 
 
-def lyric_ids(beat_map: Path) -> list[str]:
-    if not beat_map.exists():
+def lyric_ids(beat_map: Path | None) -> list[str]:
+    if beat_map is None or not beat_map.exists():
         return []
     return sorted(set(re.findall(r"\bLYR-\d+R?\b", beat_map.read_text(encoding="utf-8"))))
 
@@ -136,8 +136,8 @@ def main() -> int:
     parser.add_argument(
         "--beat-map",
         type=Path,
-        default=Path("docs/ai-everywhere-v2/01-song-beat-map.md"),
-        help="Optional lyric-ID source document",
+        default=None,
+        help="Optional lyric-ID source document (no project-specific default)",
     )
     parser.add_argument("--analysis-rate", type=int, default=22050)
     args = parser.parse_args()

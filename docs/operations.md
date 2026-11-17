@@ -10,7 +10,11 @@
 
 Быстрый read-only smoke API перед/после обслуживания: `npm run smoke:api-load` (100 параллельных запросов `/health` и `/ready`; число задаётся `QWEN_LOAD_REQUESTS`, максимум 1000). Он не запускает GPU-задачи и не меняет данные.
 
-Единый локальный production-check: `npm run check:production`. Он применяет отсутствующие миграции, запускает release gate, capability-aware multi-node smoke и read-only API load smoke; GPU-задачи не создаются.
+Единый локальный production-check: `npm run check:production`. Он применяет отсутствующие миграции, запускает release gate, capability-aware multi-node smoke, проверяет durable H3 workflow/job source snapshot (включая компиляцию sound/music и неизменность уже созданного plan при последующей правке shot) и read-only API load smoke; GPU-задачи не создаются.
+
+Перед работой с сохранёнными workflow-профилями можно выполнить `npm run preflight:active-workflows`. Команда читает только `active=true` записи в PostgreSQL внутри `READ ONLY` транзакции, применяет к ним контрактные проверки и сверяет графы с ComfyUI `/object_info`. Она не вызывает `/prompt`, не ставит задачи в очередь и не меняет профили или assets. Нужны явный `DATABASE_URL` и доступный локальный ComfyUI; адрес задаётся `COMFYUI_URL` (по умолчанию `http://127.0.0.1:8188`). Ошибка хотя бы одного профиля завершает команду с ненулевым кодом и показывает ID профиля и причину.
+
+Если ответ ComfyUI на `/prompt` потерялся, проверьте `/v1/jobs/:jobId/attempts` и локальный ComfyUI `/api/jobs/:attemptId`. Найденную задачу не отправляйте повторно: её worker продолжит polling, если успел восстановить receipt; если worker завершился, дождитесь/запустите reconcile. Для решения `success` сначала импортируйте/проверьте все выходы в Media Pool и передайте `externalRunId` и непустой список `{logicalName, assetVersionId, sha256, mimeType}`. API проверит совпадение SHA-256 и MIME с `asset_versions`, свяжет выходы с attempt и сохранит manifest атомарно. Решение `failed` не требует выходов. При unknown worker сохраняет attempt-scoped входные файлы, чтобы не сломать выполняющийся workflow.
 
 Для LAN-доступа задавать `QWEN_API_TOKEN` через защищённый environment/systemd credential store; токен не помещать в `.env.example`, логи или plan snapshots. Без токена API предназначен только для loopback-dev.
 
@@ -104,6 +108,8 @@ docker compose -f docker-compose.dev.yml --profile dev stop
 
 Перед claim проверяются requirements и reservations; перед submit — фактический диск/VRAM/model/workflow. OOM не приводит к скрытому снижению разрешения. При disk-full новые jobs приостанавливаются, временные данные удаляются только по проверенной retention policy. Контролировать queue age, heartbeat age, attempt durations, free disk, adapter errors и quarantined devices. Логи структурированные с job/attempt IDs, без prompt bodies и credentials по умолчанию.
 
+`GET /v1/runtime` и редактор генерации показывают текущий свободный/общий VRAM snapshot от ComfyUI `/system_stats`. Это телеметрия на момент чтения, не прогноз пиковой памяти будущего графа и не гарантия, что job поместится. Сетевые/parse ошибки оставляют ресурсное поле пустым, не меняя вывод о runtime health.
+
 Потеря узла: запретить новые назначения → пометить stale → проверить внешние run IDs → подтвердить остановку/завершение → вернуть ресурс. Не освобождать GPU только по истечению lease. Отмена без адресного backend API требует эксклюзивного backend instance либо ручного решения.
 
 ## Backup и восстановление
@@ -111,6 +117,10 @@ docker compose -f docker-compose.dev.yml --profile dev stop
 ### Процедура миграций
 
 Перед изменением схемы остановить новые claims, выполнить `npm run check:migrations`, создать backup (`npm run backup:local`), затем применить миграции штатным migration runner. После применения повторить `check:migrations`, `backup:catalog-check` для нового snapshot и smoke-контур. При ошибке миграции не выполнять автоматический rollback поверх рабочей БД: восстановить backup в отдельную БД, проверить совместимость worker protocol и переключать координатор только после ручного решения.
+
+`npm run db:migrate` требует явный `DATABASE_URL` и прекращает работу до подключения, если он не задан. Неявного fallback на локальную БД или Unix socket нет; перед запуском оператор проверяет, что URL указывает на намеченную среду. Production systemd example задаёт connection string явно.
+
+CLI отчёты `check:cas`, `report:cas-health`, `report:smoke-jobs`, `cas:gc-report` и `backup:restore-preflight` также используют только явный `DATABASE_URL`. GC отчёты остаются dry-run; задайте тот же URL нужной среды и `QWEN_ASSET_ROOT`, если CAS хранится не в стандартном каталоге. Для `_test` БД `cas:gc-report` требует изолированный asset root и явный флаг `--allow-test-db`.
 
 Целевые SLA RPO/RTO для большой библиотеки пока не согласованы. Последний подтверждённый локальный baseline выполнен на snapshot с 17 миграциями, 14 public tables, 16 AssetVersion links и 17 CAS-файлами; `backup:verify` и изолированный `backup:restore-rehearsal` прошли. Старые замеры времени на малом snapshot не следует использовать как SLA для текущего объёма, сетевого или крупного хранилища — требуется повторное измерение после согласования объёма библиотеки. Базовый план: остановить новые claims, дождаться завершения uploads/commits или перевести исполнение в обслуживание; зафиксировать согласованный dump БД и snapshot blobs, workflow manifests и конфигурации без plaintext credentials. Сохранить backup manifest с hashes, schema version и временем. Кэши worker не являются первичным хранилищем.
 
@@ -143,4 +153,4 @@ docker compose -f docker-compose.dev.yml --profile dev stop
 
 Текущая локальная проверка закрывает протокол, mock fault paths и один физический worker; пункты выше являются обязательными условиями масштабирования за пределы этой лаборатории.
 
-Миграции должны иметь preflight, backup и проверку совместимости workers. Перед запуском API применять идемпотентный runner `npm run db:migrate`; он ведёт таблицу `schema_migrations` и выполняет только отсутствующие версии. Неизвестная версия протокола — отказ регистрации. Retention раздельна для оригиналов, вариантов, staging и logs; значения утвердить после замера объёмов. GC сначала формирует отчёт, учитывает ссылки и grace period. При первой реализации приоритет — восстановление из backup; обратная SQL-миграция не считается автоматически безопасной.
+Миграции должны иметь preflight, backup и проверку совместимости workers. Перед запуском API применять идемпотентный runner `npm run db:migrate` с явным `DATABASE_URL`; он ведёт таблицу `schema_migrations` и выполняет только отсутствующие версии. Неизвестная версия протокола — отказ регистрации. Retention раздельна для оригиналов, вариантов, staging и logs; значения утвердить после замера объёмов. GC сначала формирует отчёт, учитывает ссылки и grace period. При первой реализации приоритет — восстановление из backup; обратная SQL-миграция не считается автоматически безопасной.

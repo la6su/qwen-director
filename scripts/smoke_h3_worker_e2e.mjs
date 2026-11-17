@@ -21,9 +21,17 @@ const schema = {
   MiniMaxH3ReferenceToVideo: {},
   MiniMaxH3ImageToVideo: { input: { required: {
     first_frame: ['IMAGE', {}], prompt: ['STRING', {}], width: ['INT', {}], height: ['INT', {}], length: ['INT', {}],
-  } }, output: ['VIDEO'] },
+  } }, output: ['CONDITIONING', 'LATENT'] },
   LoadImage: { input: { required: { image: ['STRING', {}] } }, output: ['IMAGE'] },
   RandomNoise: { input: { required: { noise_seed: ['INT', {}] } }, output: ['NOISE'] },
+  ModelSource: { input: { required: {} }, output: ['MODEL'] },
+  SigmasSource: { input: { required: {} }, output: ['SIGMAS'] },
+  SamplerSource: { input: { required: {} }, output: ['SAMPLER'] },
+  VAESource: { input: { required: {} }, output: ['VAE'] },
+  BasicGuider: { input: { required: { model: ['MODEL', {}], conditioning: ['CONDITIONING', {}] } }, output: ['GUIDER'] },
+  SamplerCustomAdvanced: { input: { required: { noise: ['NOISE', {}], guider: ['GUIDER', {}], sigmas: ['SIGMAS', {}], sampler: ['SAMPLER', {}], latent_image: ['LATENT', {}] } }, output: ['LATENT'] },
+  VAEDecode: { input: { required: { samples: ['LATENT', {}], vae: ['VAE', {}] } }, output: ['IMAGE'] },
+  VHS_VideoCombine: { input: { required: { images: ['IMAGE', {}] } }, output: ['VIDEO'] },
   SaveVideo: { input: { required: { video: ['VIDEO', {}], filename_prefix: ['STRING', {}] } }, output: [] },
 };
 
@@ -36,7 +44,7 @@ const comfy = http.createServer(async (req, res) => {
   const body = Buffer.concat(chunks);
   const json = (status, value) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
   if (url.pathname === '/object_info') return json(200, schema);
-  if (url.pathname === '/system_stats') return json(200, { system: { comfyui_version: 'mock' } });
+  if (url.pathname === '/system_stats') return json(200, { system: { comfyui_version: 'mock', pytorch_version: 'mock-torch', python_version: 'mock-python', os: 'mock-os' }, devices: [{ name: 'mock-gpu', type: 'cuda', vram_total: 8192, vram_free: 4096 }] });
   if (url.pathname === '/upload/image' && req.method === 'POST') {
     uploadedReferenceBody = body;
     return json(200, { name: 'uploaded-source.png', subfolder: 'input', type: 'input' });
@@ -59,7 +67,7 @@ process.env.COMFYUI_URL = comfyUrl;
 const { app } = await import('../apps/api/src/index.ts');
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const apiUrl = await app.listen({ host: '127.0.0.1', port: 0 });
-const ids = { project: randomUUID(), scene: randomUUID(), shot: randomUUID(), input: undefined, job: undefined, node: randomUUID() };
+const ids = { project: randomUUID(), scene: randomUUID(), shot: randomUUID(), input: undefined, output: undefined, job: undefined, node: randomUUID() };
 let worker;
 let workerLogs = '';
 
@@ -87,7 +95,12 @@ try {
     h: { class_type: 'MiniMaxH3ImageToVideo', inputs: { first_frame: ['image', 0], prompt: 'Workflow prompt', width: 768, height: 432, length: 56 } },
     image: { class_type: 'LoadImage', inputs: { image: 'template.png' } },
     noise: { class_type: 'RandomNoise', inputs: { noise_seed: 0 } },
-    save: { class_type: 'SaveVideo', inputs: { video: ['h', 0], filename_prefix: 'template' } },
+    model: { class_type: 'ModelSource', inputs: {} }, sigmas: { class_type: 'SigmasSource', inputs: {} }, samplerType: { class_type: 'SamplerSource', inputs: {} }, vae: { class_type: 'VAESource', inputs: {} },
+    guider: { class_type: 'BasicGuider', inputs: { model: ['model', 0], conditioning: ['h', 0] } },
+    sampler: { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['noise', 0], guider: ['guider', 0], sigmas: ['sigmas', 0], sampler: ['samplerType', 0], latent_image: ['h', 1] } },
+    decode: { class_type: 'VAEDecode', inputs: { samples: ['sampler', 0], vae: ['vae', 0] } },
+    combine: { class_type: 'VHS_VideoCombine', inputs: { images: ['decode', 0] } },
+    save: { class_type: 'SaveVideo', inputs: { video: ['combine', 0], filename_prefix: 'template' } },
   };
   const profileId = `h3-i2va-${randomUUID()}`;
   const saved = await app.inject({ method: 'POST', url: '/v1/workflow-profiles', payload: { id: profileId, name: 'I2VA worker E2E', graph } });
@@ -140,7 +153,22 @@ try {
 
   const result = await app.inject({ method: 'GET', url: `/v1/jobs/${ids.job}/result` });
   assert.equal(result.statusCode, 200, result.body);
+  const evidence = result.json().manifest.executionEvidence;
+  assert.equal(evidence.schemaVersion, 'qwendirector-comfy-execution-evidence/v1');
+  assert.equal(evidence.scope, 'execution-only');
+  assert.equal(evidence.reviewStatus, 'pending-human-review');
+  assert.equal(evidence.workflow.profileId, profileId);
+  assert.match(evidence.workflow.profileGraphHash, /^[a-f0-9]{64}$/);
+  assert.match(evidence.workflow.effectiveGraphHash, /^[a-f0-9]{64}$/);
+  assert.notEqual(evidence.workflow.profileGraphHash, evidence.workflow.effectiveGraphHash);
+  assert.deepEqual(evidence.settings, { width: 768, height: 432, frameCount: 56, seed: 27 });
+  assert.equal(evidence.runtime.status, 'captured');
+  assert.equal(evidence.runtime.comfyuiVersion, 'mock');
+  assert.equal(evidence.runtime.pytorchVersion, 'mock-torch');
+  assert.deepEqual(evidence.runtime.devices, [{ name: 'mock-gpu', type: 'cuda', vramTotalBytes: 8192, vramFreeBytes: 4096 }]);
+  assert.equal(evidence.qualityControl.status, 'not-performed');
   const output = result.json().manifest.outputs[0];
+  ids.output = output.assetVersionId;
   assert.equal(output.mimeType, 'video/mp4');
   const stored = await app.inject({ method: 'GET', url: `/v1/assets/${output.assetVersionId}` });
   assert.equal(stored.statusCode, 200);
@@ -164,6 +192,7 @@ try {
   await pool.query('delete from scenes where id=$1', [ids.scene]);
   await pool.query('delete from projects where id=$1', [ids.project]);
   if (ids.input) await pool.query('delete from asset_versions where id=$1', [ids.input]);
+  if (ids.output) await pool.query('delete from asset_versions where id=$1', [ids.output]);
   await pool.end();
   await app.close();
   await new Promise((resolve) => comfy.close(resolve));

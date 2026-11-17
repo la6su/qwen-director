@@ -1,6 +1,7 @@
 import pg from 'pg';
+import databaseUrl from './lib/require-database-url.mjs';
 
-const pool = new pg.Pool({ host: '/var/run/postgresql', user: process.env.PGUSER ?? 'la6', database: process.env.PGDATABASE ?? 'qwendirector' });
+const pool = new pg.Pool({ connectionString: databaseUrl });
 const fixtureNames = ['smoke', 'e2e', 'failure', 'reconcile', 'resolve', 'retry', 'workflow', 'result', 'select', 'binding-guard', 'multi-node smoke', 'attempts-smoke', 'asset smoke', 'profile-source', 'API integration smoke'];
 try {
   const result = await pool.query(`

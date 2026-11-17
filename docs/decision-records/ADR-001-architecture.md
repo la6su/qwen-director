@@ -43,4 +43,10 @@ Fastify выбран как компактная HTTP-граница с вали
 
 Потребуется собственный минимальный UX и миграции. Зато библиотека, версии промптов и очередь не наследуют неизвестных ограничений upstream. Центральный API/БД остаётся точкой отказа на ранних этапах; workers переживают его недоступность через журнал/reconcile, но новые назначения при остановке координатора не выполняются.
 
+Для неоднозначного ответа локального ComfyUI `/prompt` attempt UUID передаётся как backend `prompt_id`; worker пытается найти этот ID через локальный read-only job lookup. Без подтверждения job переходит в durable `reconciling/unknown`, а повторный запуск не делается автоматически. Это следует правилу at-most-once acceptance на границе, где ComfyUI не предоставляет надёжную идемпотентность submit.
+
 Связанные документы: [архитектура](../architecture.md), [roadmap](../roadmap.md), [контракт](../workflow-adapter-contract.md).
+
+## Дополнение (2026-11-16): provenance planner в durable plan
+
+Planner Assist остаётся локальным read/plan инструментом без права создавать job. Когда пользователь применяет его предложение, job может сохранить provenance решения лишь после серверной сверки hash полей, continuity audit, project-bound session и исходного assistant turn. Эта запись входит в immutable `jobs.plan_json`; редактирование полей после применения исключает receipt из запроса. Ручное создание job не зависит от Planner Assist. См. [контракт адаптера](../workflow-adapter-contract.md).

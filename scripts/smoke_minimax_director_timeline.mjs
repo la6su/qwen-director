@@ -34,6 +34,22 @@ assert.equal(resolved.readyForReview, true);
 assert.equal(resolved.unresolvedReferences.length, 0);
 assert.equal(resolved.document.scenes[0].shots[0].referenceAssetVersionIds.length, 2);
 assert.equal(resolved.document.scenes[0].shots[1].referenceAssetVersionIds.length, 3);
+const sharedFrame = { imageFile: 'shared-frame.png', type: 'input', subfolder: '' };
+const frameTimeline = parseMiniMaxDirectorTimeline({
+  version: 5, frameRate: 24, totalFrames: 124, width: 1152, height: 640, refMaxSize: 1152,
+  global: {},
+  segments: [{ id: 'frame-pair', start: 0, length: 124, startImage: sharedFrame, endImage: sharedFrame }],
+});
+assert.deepEqual(frameTimeline.media.map(({ role }) => role), ['first-frame', 'last-frame']);
+assert.notEqual(minimaxDirectorMediaKey(frameTimeline.media[0]), minimaxDirectorMediaKey(frameTimeline.media[1]));
+const sharedAsset = Object.fromEntries(frameTimeline.media.map((media) => [minimaxDirectorMediaKey(media), 'same-asset-version']));
+const frameProposal = buildMiniMaxDirectorDesignProposal(frameTimeline, { ...baseInput, assetVersionByMediaKey: sharedAsset });
+assert.equal(frameProposal.readyForReview, true);
+assert.equal(frameProposal.document.scenes[0].shots[0].referenceAssetVersionIds.length, 1);
+assert.deepEqual(frameProposal.document.scenes[0].shots[0].sourceMetadata.referenceBindings.map(({ role, assetVersionId }) => ({ role, assetVersionId })), [
+  { role: 'first-frame', assetVersionId: 'same-asset-version' },
+  { role: 'last-frame', assetVersionId: 'same-asset-version' },
+]);
 assert.throws(() => parseMiniMaxDirectorTimeline({ ...source, version: 6 }), /AIMIXER_TIMELINE_VERSION_UNSUPPORTED/);
 assert.throws(() => parseMiniMaxDirectorTimeline({ ...source, segments: [{ id: 'bad', start: 0, length: -1 }] }), /AIMIXER_TIMELINE_SEGMENT_LENGTH_INVALID/);
 assert.throws(() => parseMiniMaxDirectorTimeline({ ...source, segments: [{ id: 'a', start: 0, length: 124 }, { id: 'b', start: 100, length: 124 }] }), /AIMIXER_TIMELINE_SEGMENT_RANGE_INVALID/);

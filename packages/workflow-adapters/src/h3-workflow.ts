@@ -17,7 +17,35 @@ function isUpstream(graph: ComfyApiWorkflow, from: string, target: string, seen 
   if (from === target) return true;
   if (seen.has(from)) return false;
   seen.add(from);
-  return Object.values(graph[from]?.inputs ?? {}).some((value) => { const id = linkedNodeId(value); return id ? isUpstream(graph, id, target, seen) : false; });
+  const node = graph[from];
+  const inputs = node?.class_type === 'ComfySwitchNode'
+    ? [node.inputs?.[node.inputs?.switch === false ? 'on_false' : 'on_true']]
+    : Object.values(node?.inputs ?? {});
+  return inputs.some((value) => { const id = linkedNodeId(value); return id ? isUpstream(graph, id, target, seen) : false; });
+}
+
+function validateH3OutputPath(workflow: ComfyApiWorkflow, h3NodeId: string, noiseNodeId: string, saveNodeId: string, requiredAncestors: string[] = []): void {
+  const samplers = Object.entries(workflow).filter(([, node]) => ['SamplerCustomAdvanced', 'KSampler'].includes(node?.class_type ?? '')).map(([id]) => id);
+  const connected = samplers.some((samplerId) =>
+    isUpstream(workflow, saveNodeId, samplerId)
+    && isUpstream(workflow, samplerId, h3NodeId)
+    && isUpstream(workflow, samplerId, noiseNodeId)
+    && requiredAncestors.every((id) => isUpstream(workflow, samplerId, id)));
+  if (!connected) throw new Error('H3_WORKFLOW_GENERATION_PATH_DISCONNECTED');
+}
+
+export function validateH3ReferenceSlotBindings(workflow: ComfyApiWorkflow, h3NodeId: string, family: 'image' | 'audio' | 'video', ids: string[], classes: string[]): void {
+  const pattern = family === 'image' ? /^ref_images\.ref_image_(\d+)$/
+    : family === 'audio' ? /^ref_audios\.ref_audio_(\d+)$/
+      : /^ref_videos\.ref_video_(\d+)$/;
+  const slots = Object.entries(workflow[h3NodeId]?.inputs ?? {}).flatMap(([name, value]) => {
+    const match = pattern.exec(name);
+    return match && linkedNodeId(value) ? [{ index: Number(match[1]), source: linkedNodeId(value)! }] : [];
+  }).sort((a, b) => a.index - b.index);
+  if (slots.length !== ids.length || slots.some((slot, index) => slot.index !== index)) throw new Error(`H3_WORKFLOW_${family.toUpperCase()}_REFERENCE_SLOTS_MISMATCH`);
+  for (let index = 0; index < slots.length; index++) {
+    if (!classes.includes(workflow[ids[index]]?.class_type ?? '') || !isUpstream(workflow, slots[index].source, ids[index])) throw new Error(`H3_WORKFLOW_${family.toUpperCase()}_REFERENCE_NOT_CONNECTED`);
+  }
 }
 
 function validateVedaWorkflow(workflow: ComfyApiWorkflow, h3NodeId: string, h3Node: NonNullable<ComfyApiWorkflow[string]>, find: (classType: string) => [string, NonNullable<ComfyApiWorkflow[string]>][]): H3WorkflowBoundary {
@@ -70,7 +98,12 @@ export function validateH3RefModWorkflow(workflow: ComfyApiWorkflow, bindings: {
   if (!imageNodeIds.length || imageNodeIds.some((id) => workflow[id]?.class_type !== 'LoadImage')) throw new Error('H3_REFMOD_IMAGE_BINDINGS_REQUIRED');
   const firstFrame = h3[0][1].inputs?.first_frame;
   if (!Array.isArray(firstFrame) || firstFrame.length !== 2 || typeof firstFrame[0] !== 'string') throw new Error('H3_REFMOD_FIRST_FRAME_REQUIRED');
-  return { mode: 'refmod-i2v', h3NodeId: h3[0][0], noiseNodeId: noise[0][0], saveNodeId: save[0][0], modLoaderNodeId: mods[0][0], imageNodeIds };
+  const expectedImageIds = [linkedNodeId(firstFrame), linkedNodeId(h3[0][1].inputs?.last_frame)].filter((id): id is string => Boolean(id));
+  if (expectedImageIds.length !== imageNodeIds.length || expectedImageIds.some((id, index) => id !== imageNodeIds[index])) throw new Error('H3_REFMOD_IMAGE_BINDINGS_MUST_MATCH_FRAME_ORDER');
+  const h3NodeId = h3[0][0]; const noiseNodeId = noise[0][0]; const saveNodeId = save[0][0]; const applyNodeId = apply[0][0]; const modLoaderNodeId = mods[0][0];
+  if (!isUpstream(workflow, applyNodeId, h3NodeId) || !isUpstream(workflow, applyNodeId, modLoaderNodeId)) throw new Error('H3_REFMOD_PATH_DISCONNECTED');
+  validateH3OutputPath(workflow, h3NodeId, noiseNodeId, saveNodeId, [applyNodeId, modLoaderNodeId]);
+  return { mode: 'refmod-i2v', h3NodeId, noiseNodeId, saveNodeId, modLoaderNodeId, imageNodeIds };
 }
 
 /** Validate the portable H3 boundary without depending on node IDs or internal graph layout. */
@@ -81,6 +114,7 @@ export function validateH3Workflow(workflow: ComfyApiWorkflow): H3WorkflowBounda
   if (ref2va.length && (find('MMH3UltimateUpscale').length || find('VedaSparseAttention').length)) return validateVedaWorkflow(workflow, ref2va[0][0], ref2va[0][1], find);
   if (noise.length !== 1) throw new Error(`H3_WORKFLOW_REQUIRES_ONE_NOISE_NODE:${noise.length}`);
   if (save.length !== 1) throw new Error(`H3_WORKFLOW_REQUIRES_ONE_SAVE_NODE:${save.length}`);
+  validateH3OutputPath(workflow, (i2va[0] ?? ref2va[0])[0], noise[0][0], save[0][0]);
   if (i2va.length) {
     const h3Node = i2va[0][1];
     const firstFrame = linkedNodeId(h3Node.inputs?.first_frame);

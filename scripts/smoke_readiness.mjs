@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-process.env.QWEN_STORAGE='memory'; process.env.QWEN_API_AUTOSTART='false';
+process.env.QWEN_STORAGE='memory'; process.env.QWEN_API_AUTOSTART='false'; process.env.QWEN_LLAMA_URL='http://llama-test.invalid:8081';
 const { app } = await import('../apps/api/src/index.ts');
 const old = globalThis.fetch;
 try {

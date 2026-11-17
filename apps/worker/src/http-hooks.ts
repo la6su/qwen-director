@@ -35,4 +35,8 @@ export class HttpExecutionHooks implements ExecutionHooks {
   async fail(ctx: AttemptContext, error: unknown) {
     await fetch(`${this.url(ctx)}/cancel`, { method: 'POST', headers: this.headers(), body: JSON.stringify({ fencingToken: ctx.fencingToken, error: String(error) }) });
   }
+  async unknown(ctx: AttemptContext, error: unknown) {
+    const response = await fetch(`${this.url(ctx)}/unknown`, { method:'POST', headers:this.headers(), body:JSON.stringify({ fencingToken:ctx.fencingToken, error:String(error) }) });
+    if (!response.ok) throw new Error(`UNKNOWN_SUBMIT_RECORD_FAILED_${response.status}`);
+  }
 }

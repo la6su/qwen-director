@@ -1,7 +1,8 @@
 import pg from 'pg';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-const pool = new pg.Pool({ host:'/var/run/postgresql', user:process.env.PGUSER ?? 'la6', database:process.env.PGDATABASE ?? 'qwendirector' });
+import databaseUrl from './lib/require-database-url.mjs';
+const pool = new pg.Pool({ connectionString: databaseUrl });
 const root = process.env.QWEN_ASSET_ROOT ?? '.data/assets';
 try {
   const rows = (await pool.query('select id,storage_key,sha256,asset_kind from asset_versions order by created_at')).rows;

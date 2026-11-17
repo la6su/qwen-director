@@ -6,10 +6,15 @@ const graph = {
   '128': { class_type: 'RandomNoise', inputs: { noise_seed: 1 } },
   '136': { class_type: 'SaveVideo', inputs: { filename_prefix: 'old' } },
   '200': { class_type: 'MiniMaxH3RefModsLoader', inputs: { mod_1: 'car', mod_2: 'actor' } },
-  '201': { class_type: 'MiniMaxH3RefModApply', inputs: {} },
+  '201': { class_type: 'MiniMaxH3RefModApply', inputs: { conditioning: ['127', 0], mods: ['200', 0] } },
+  '210': { class_type: 'BasicGuider', inputs: { conditioning: ['201', 0] } },
+  '211': { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['128', 0], guider: ['210', 0], latent_image: ['127', 1] } },
+  '212': { class_type: 'VAEDecode', inputs: { samples: ['211', 0] } },
+  '213': { class_type: 'VHS_VideoCombine', inputs: { images: ['212', 0] } },
   '202': { class_type: 'LoadImage', inputs: { image: 'old-start.png' } },
   '203': { class_type: 'LoadImage', inputs: { image: 'old-end.png' } },
 };
+graph['136'].inputs.video = ['213', 0];
 const profile = createH3RefModWorkflowProfile('refmod-smoke', 'RefMod smoke', graph, { imageNodeIds: ['202', '203'] });
 assert.equal(profile.boundary.mode, 'refmod-i2v');
 const injected = injectH3Inputs(profile, {

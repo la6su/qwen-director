@@ -5,6 +5,8 @@ import type { AssetStorage } from '@qwendirector/storage';
 import { createH3WorkflowProfile, type H3WorkflowProfile } from '@qwendirector/workflow-adapters/h3-profile';
 import { parseMiniMaxDirectorTimeline, minimaxDirectorMediaKey } from '@qwendirector/workflow-adapters/minimax-director-timeline';
 import { buildMiniMaxDirectorDesignProposal } from '@qwendirector/workflow-adapters/minimax-director-plan';
+import { normalizeMontageShotMetadata, type MontageShotMetadata } from '@qwendirector/contracts/planner';
+import { normalizeH3EventPlan } from '@qwendirector/contracts/h3-event-plan';
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -56,6 +58,19 @@ export class PgAttemptRepository {
     try { await client.query('BEGIN'); const row = (await client.query(`update attempts set state='failed',error_detail=$3,error_at=now() where id=$1 and fencing_token=$2 and state in ('leased','running') returning job_id`, [attemptId, fencingToken, String(error).slice(0, 4000)])).rows[0]; if (!row) throw new Error('FENCING_REJECTED_OR_INVALID_STATE'); await client.query("update jobs set state=case when state='cancel_requested' then 'cancelled' else 'failed' end where id=$1", [row.job_id]); await client.query('COMMIT'); return { attemptId, jobId: row.job_id, state:'failed', error: String(error) }; } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
   }
 
+  async markUnknown(attemptId: string, fencingToken: number, error: unknown) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const row = (await client.query(`update attempts set state='unknown',error_detail=$3,error_at=now() where id=$1 and fencing_token=$2 and state in ('leased','running') returning job_id`, [attemptId, fencingToken, String(error).slice(0, 4000)])).rows[0];
+      if (!row) throw new Error('FENCING_REJECTED_OR_INVALID_STATE');
+      await client.query("update jobs set state='reconciling' where id=$1", [row.job_id]);
+      await client.query('COMMIT');
+      return { attemptId, jobId:row.job_id, state:'unknown' };
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+
   async reconcileExpired() {
     const client = await this.pool.connect();
     try { await client.query('BEGIN'); const result = await client.query(`update attempts set state='unknown' where state in ('leased','running') and lease_expires_at < now() returning id,job_id`); if (result.rowCount) await client.query("update jobs set state='reconciling' where id = any($1::uuid[])", [result.rows.map((row) => row.job_id)]); await client.query('COMMIT'); return { reconciled: result.rowCount ?? 0, attempts: result.rows.map((row) => row.id) }; } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
@@ -64,7 +79,41 @@ export class PgAttemptRepository {
   async resolveUnknown(attemptId: string, decision: 'success' | 'failed', actor: string, manifest: unknown = {}) {
     if (!actor || !['success','failed'].includes(decision)) throw new Error('INVALID_RECONCILE_DECISION');
     const client = await this.pool.connect();
-    try { await client.query('BEGIN'); const row=(await client.query("select job_id,state from attempts where id=$1 for update",[attemptId])).rows[0]; if (!row || row.state !== 'unknown') throw new Error('INVALID_RECONCILE_STATE'); const next=decision==='success'?'succeeded':'failed'; if (decision==='success') { const hash=manifestHash(manifest); await client.query('insert into attempt_manifests(attempt_id,manifest_hash,manifest) values($1,$2,$3)',[attemptId,hash,manifest]); } await client.query('update attempts set state=$2 where id=$1',[attemptId,next]); await client.query('update jobs set state=$2 where id=$1',[row.job_id,next]); await client.query('COMMIT'); return {attemptId,jobId:row.job_id,state:next,actor}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+    try {
+      await client.query('BEGIN');
+      const row = (await client.query("select job_id,state from attempts where id=$1 for update", [attemptId])).rows[0];
+      if (!row || row.state !== 'unknown') throw new Error('INVALID_RECONCILE_STATE');
+      const next = decision === 'success' ? 'succeeded' : 'failed';
+      if (decision === 'success') {
+        if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('RECONCILE_MANIFEST_REQUIRED');
+        const candidate = manifest as Record<string, unknown>;
+        if (typeof candidate.externalRunId !== 'string' || !candidate.externalRunId.trim()) throw new Error('RECONCILE_EXTERNAL_RUN_ID_REQUIRED');
+        if (!Array.isArray(candidate.outputs) || candidate.outputs.length === 0) throw new Error('RECONCILE_OUTPUTS_REQUIRED');
+        const outputs = candidate.outputs.map((output) => {
+          if (!output || typeof output !== 'object' || Array.isArray(output)) throw new Error('RECONCILE_OUTPUT_INVALID');
+          const item = output as Record<string, unknown>;
+          if (typeof item.logicalName !== 'string' || !item.logicalName.trim() || typeof item.assetVersionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.assetVersionId) || typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(item.sha256) || typeof item.mimeType !== 'string' || !item.mimeType.trim()) throw new Error('RECONCILE_OUTPUT_INVALID');
+          return { logicalName:item.logicalName, assetVersionId:item.assetVersionId.toLowerCase(), sha256:item.sha256.toLowerCase(), mimeType:item.mimeType };
+        });
+        if (new Set(outputs.map((output) => output.logicalName)).size !== outputs.length || new Set(outputs.map((output) => output.assetVersionId)).size !== outputs.length) throw new Error('RECONCILE_OUTPUTS_DUPLICATE');
+        const assets = await client.query('select id,sha256,mime_type from asset_versions where id = any($1::uuid[])', [outputs.map((output) => output.assetVersionId)]);
+        const assetById = new Map(assets.rows.map((asset) => [asset.id, { sha256:asset.sha256, mimeType:asset.mime_type }]));
+        if (assetById.size !== outputs.length || outputs.some((output) => { const asset = assetById.get(output.assetVersionId); return asset?.sha256 !== output.sha256 || asset?.mimeType !== output.mimeType; })) throw new Error('RECONCILE_OUTPUT_ASSET_MISMATCH');
+        for (const output of outputs) {
+          const existing = (await client.query('select asset_version_id from attempt_assets where attempt_id=$1 and logical_name=$2', [attemptId, output.logicalName])).rows[0];
+          if (existing && existing.asset_version_id !== output.assetVersionId) throw new Error('RECONCILE_OUTPUT_ASSET_MISMATCH');
+          if (!existing) await client.query('insert into attempt_assets(attempt_id,asset_version_id,logical_name) values($1,$2,$3)', [attemptId, output.assetVersionId, output.logicalName]);
+        }
+        const reconciledManifest = { externalRunId:candidate.externalRunId.trim(), reconciledBy:actor, outputs };
+        const hash = manifestHash(reconciledManifest);
+        await client.query('insert into attempt_manifests(attempt_id,manifest_hash,manifest) values($1,$2,$3)', [attemptId, hash, reconciledManifest]);
+      }
+      await client.query('update attempts set state=$2 where id=$1', [attemptId, next]);
+      await client.query('update jobs set state=$2 where id=$1', [row.job_id, next]);
+      await client.query('COMMIT');
+      return { attemptId, jobId:row.job_id, state:next, actor };
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
   }
 
   async commit(attemptId: string, fencingToken: number, manifest: unknown) {
@@ -261,7 +310,7 @@ export class PgAttemptRepository {
         const segmentRefs = referencedMedia.filter((media) => media.scopes.includes('global') || media.segmentIds.includes(segment.id));
         for (const [refPosition, media] of segmentRefs.entries()) {
           const mediaType = media.kind;
-          const role = mediaType === 'audio' ? 'audio' : mediaType === 'video' ? 'video' : 'picture';
+          const role = media.role;
           await client.query(`insert into shot_reference_assets(shot_id,asset_version_id,position,logical_name,media_type,role)
             values($1,$2,$3,$4,$5,$6)`, [shotId, assetVersionByMediaKey[minimaxDirectorMediaKey(media)], refPosition, media.fileName, mediaType, role]);
         }
@@ -274,7 +323,16 @@ export class PgAttemptRepository {
   async renameProject(id: string, name: string) { if (!name?.trim()) throw new Error('INVALID_PROJECT_NAME'); const r=await this.pool.query('update projects set name=$2 where id=$1 returning id,name,created_at',[id,name.trim()]); if(!r.rowCount) throw new Error('PROJECT_NOT_FOUND'); return r.rows[0]; }
   async renameScene(id: string, title: string) { if (!title?.trim()) throw new Error('INVALID_SCENE_TITLE'); const r=await this.pool.query('update scenes set title=$2 where id=$1 returning id,project_id,title,position',[id,title.trim()]); if(!r.rowCount) throw new Error('SCENE_NOT_FOUND'); return r.rows[0]; }
   async renameShot(id: string, title: string, durationSeconds?: number) { if (!title?.trim()) throw new Error('INVALID_SHOT_TITLE'); if (durationSeconds !== undefined && (!Number.isFinite(durationSeconds) || durationSeconds <= 0)) throw new Error('INVALID_SHOT_DURATION'); const r=await this.pool.query('update shots set title=$2,duration_seconds=coalesce($3,duration_seconds),plan_revision=plan_revision+1 where id=$1 returning id,scene_id,title,position,duration_seconds,plan_revision',[id,title.trim(),durationSeconds ?? null]); if(!r.rowCount) throw new Error('SHOT_NOT_FOUND'); return r.rows[0]; }
-  async saveShotPrompt(id: string, prompt: Record<string, unknown>) { if (!prompt || typeof prompt !== 'object' || Array.isArray(prompt)) throw new Error('INVALID_SHOT_PROMPT'); const r=await this.pool.query('update shots set director_prompt=$2,prompt_revision=prompt_revision+1,plan_revision=plan_revision+1 where id=$1 returning id,prompt_revision,plan_revision,director_prompt',[id,prompt]); if(!r.rowCount) throw new Error('SHOT_NOT_FOUND'); return r.rows[0]; }
+  async saveShotPrompt(id: string, prompt: Record<string, unknown>) { if (!prompt || typeof prompt !== 'object' || Array.isArray(prompt)) throw new Error('INVALID_SHOT_PROMPT'); const normalized = { ...prompt, ...(prompt.eventPlan === null ? {} : prompt.eventPlan !== undefined ? { eventPlan: normalizeH3EventPlan(prompt.eventPlan) } : {}) }; if (prompt.eventPlan === null) delete normalized.eventPlan; const r=await this.pool.query('update shots set director_prompt=$2,prompt_revision=prompt_revision+1,plan_revision=plan_revision+1 where id=$1 returning id,prompt_revision,plan_revision,director_prompt',[id,normalized]); if(!r.rowCount) throw new Error('SHOT_NOT_FOUND'); return r.rows[0]; }
+  async saveShotMontageMetadata(id: string, metadata: MontageShotMetadata) {
+    const normalized = normalizeMontageShotMetadata(metadata) ?? {};
+    const r = await this.pool.query(`update shots
+      set source_metadata = coalesce(source_metadata,'{}'::jsonb) || jsonb_build_object('directing', (case when jsonb_typeof(source_metadata->'directing')='object' then source_metadata->'directing' else '{}'::jsonb end) || jsonb_build_object('montage',$2::jsonb)),
+          plan_revision=plan_revision+1
+      where id=$1 returning id,plan_revision,source_metadata`, [id, JSON.stringify(normalized)]);
+    if (!r.rowCount) throw new Error('SHOT_NOT_FOUND');
+    return r.rows[0];
+  }
   async reorderShots(sceneId: string, shotIds: string[]) {
     if (!Array.isArray(shotIds) || shotIds.length < 1 || shotIds.some((id) => typeof id !== 'string' || !id)) throw new Error('INVALID_SHOT_ORDER');
     const client = await this.pool.connect();
@@ -330,8 +388,8 @@ export class PgAttemptRepository {
     return result.rows[0];
   }
   async saveWorkflowProfile(profile: H3WorkflowProfile) { const client=await this.pool.connect(); try { await client.query('BEGIN'); const bindings=profile.referenceBindings ?? {}; const result=await client.query(`insert into workflow_profiles(id,name,graph,graph_hash,boundary,reference_bindings,active) values($1,$2,$3,$4,$5,$6,false) on conflict(id) do update set name=excluded.name,graph=excluded.graph,graph_hash=excluded.graph_hash,boundary=excluded.boundary,reference_bindings=excluded.reference_bindings,active=false returning id,name,graph_hash,boundary,reference_bindings,created_at,active`,[profile.id,profile.name,profile.graph,profile.graphHash,profile.boundary,bindings]); const next=await client.query('select coalesce(max(revision),0)+1 as revision from workflow_profile_revisions where profile_id=$1',[profile.id]); await client.query('insert into workflow_profile_revisions(profile_id,revision,graph,graph_hash,boundary,reference_bindings) values($1,$2,$3,$4,$5,$6)',[profile.id,next.rows[0].revision,profile.graph,profile.graphHash,profile.boundary,bindings]); await client.query('COMMIT'); return {...result.rows[0],revision:Number(next.rows[0].revision),model_stack:profile.modelStack}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); } }
-  async saveWorkbenchProfile(profile: { id: string; name: string; kind: string; graph: Record<string, unknown>; graphHash: string; boundary: Record<string, unknown> }) {
-    const client=await this.pool.connect(); try { await client.query('BEGIN'); const bindings={ workbenchKind: profile.kind }; const result=await client.query(`insert into workflow_profiles(id,name,graph,graph_hash,boundary,reference_bindings,active) values($1,$2,$3,$4,$5,$6,false) on conflict(id) do update set name=excluded.name,graph=excluded.graph,graph_hash=excluded.graph_hash,boundary=excluded.boundary,reference_bindings=excluded.reference_bindings,active=false returning id,name,graph_hash,boundary,reference_bindings,created_at,active`,[profile.id,profile.name,profile.graph,profile.graphHash,profile.boundary,bindings]); const next=await client.query('select coalesce(max(revision),0)+1 as revision from workflow_profile_revisions where profile_id=$1',[profile.id]); await client.query('insert into workflow_profile_revisions(profile_id,revision,graph,graph_hash,boundary,reference_bindings) values($1,$2,$3,$4,$5,$6)',[profile.id,next.rows[0].revision,profile.graph,profile.graphHash,profile.boundary,bindings]); await client.query('COMMIT'); return {...result.rows[0],revision:Number(next.rows[0].revision)}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+  async saveWorkbenchProfile(profile: { id: string; name: string; kind: string; graph: Record<string, unknown>; graphHash: string; boundary: Record<string, unknown>; referenceBindings?: Record<string, unknown> }) {
+    const client=await this.pool.connect(); try { await client.query('BEGIN'); const bindings={ workbenchKind: profile.kind, ...(profile.referenceBindings ?? {}) }; const result=await client.query(`insert into workflow_profiles(id,name,graph,graph_hash,boundary,reference_bindings,active) values($1,$2,$3,$4,$5,$6,false) on conflict(id) do update set name=excluded.name,graph=excluded.graph,graph_hash=excluded.graph_hash,boundary=excluded.boundary,reference_bindings=excluded.reference_bindings,active=false returning id,name,graph_hash,boundary,reference_bindings,created_at,active`,[profile.id,profile.name,profile.graph,profile.graphHash,profile.boundary,bindings]); const next=await client.query('select coalesce(max(revision),0)+1 as revision from workflow_profile_revisions where profile_id=$1',[profile.id]); await client.query('insert into workflow_profile_revisions(profile_id,revision,graph,graph_hash,boundary,reference_bindings) values($1,$2,$3,$4,$5,$6)',[profile.id,next.rows[0].revision,profile.graph,profile.graphHash,profile.boundary,bindings]); await client.query('COMMIT'); return {...result.rows[0],revision:Number(next.rows[0].revision)}; } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
   }
   private profileReadModel(row: any) {
     try { const derived=createH3WorkflowProfile(row.id,row.name,row.graph,row.reference_bindings ?? undefined); return { ...row, quality_hint: derived.qualityHint, sampling_steps: derived.samplingSteps, loras: derived.loras, model_stack: derived.modelStack }; }

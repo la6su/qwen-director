@@ -35,6 +35,8 @@ Domain ничего не знает о Fastify, файловых путях и C
 
 Исходники проекта связываются с `AssetVersion` отдельно от shot references и результатов attempts. `project_assets` хранит роль, логическое имя, автора связи и время; такой master asset, как саундтрек, принадлежит проекту целиком и не притворяется входом каждого видеошота. Байты остаются неизменяемыми в CAS, а связь хранит назначение исходника в каталоге.
 
+Связи `shot_reference_assets` задают роль каждой reference slot отдельно от самого immutable `AssetVersion`. Один и тот же blob допустимо связать с одним шотом повторно, если он занимает разные смысловые слоты (например, First Frame и Last Frame); уникальность задаётся сочетанием shot, asset version и role.
+
 ## Исполнение
 
 ```mermaid
@@ -95,4 +97,4 @@ Node регистрируется выданным локально токено
 
 MVP слушает loopback, browser mutations проверяют Origin и сессию; удалённый доступ — через настроенный LAN TLS/VPN и авторизацию. Multi-node требует отдельных отзываемых node credentials. Секреты — ссылки на конфигурацию, не часть prompt/provenance. Модели, ассеты и текст не уходят наружу по умолчанию; внешнему адаптеру нужны enable flag и approval конкретного payload. Workflow считается исполняемым кодом: allowlist, проверка digest, запрет произвольных shell команд и URL fetch.
 
-Для provenance сохраняются исходные revision IDs, hash плана, адаптер/version, workflow digest, model digest, seed (если поддерживается), фактические параметры, node/device, run ID, timestamps, output hashes и approvals. Отсутствующее значение помечается unknown; provenance не обещает битовую воспроизводимость GPU-генерации.
+Для provenance сохраняются исходные revision IDs, hash плана, адаптер/version, workflow digest, model digest, seed (если поддерживается), фактические параметры, node/device, run ID, timestamps, output hashes и approvals. Если job принят из Planner Assist, immutable plan также содержит проверенный receipt решения: hash текущих секций, project-bound session ID и происхождение локальной модели/прочитанных инструментов, сверенное с сохранённым assistant turn. Отсутствующее значение помечается unknown; provenance не обещает битовую воспроизводимость GPU-генерации.

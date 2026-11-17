@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { validateH3Workflow, validateH3RefModWorkflow, type ComfyApiWorkflow } from './h3-workflow.js';
+import { validateH3Workflow, validateH3RefModWorkflow, validateH3ReferenceSlotBindings, type ComfyApiWorkflow } from './h3-workflow.js';
 
 export interface H3ReferenceBinding { imageNodeIds?: string[]; audioNodeIds?: string[]; videoNodeIds?: string[]; }
 export interface H3WorkflowProfile {
@@ -22,13 +22,22 @@ function deriveModelStack(graph: ComfyApiWorkflow) {
   })).sort((a, b) => a.role.localeCompare(b.role) || a.nodeClass.localeCompare(b.nodeClass) || a.name.localeCompare(b.name));
 }
 
-function validateReferenceBindings(graph: ComfyApiWorkflow, bindings: H3ReferenceBinding): void {
+function validateReferenceBindings(graph: ComfyApiWorkflow, bindings: H3ReferenceBinding, boundary: ReturnType<typeof validateH3Workflow>): void {
   const valid = (ids: string[], classes: string[]) => ids.every((id) => classes.includes(graph[id]?.class_type ?? '')) && new Set(ids).size === ids.length;
   if (!valid(bindings.imageNodeIds ?? [], ['LoadImage'])) throw new Error('H3_WORKFLOW_REFERENCE_BINDING_INVALID:image');
   if (!valid(bindings.audioNodeIds ?? [], ['LoadAudio', 'VHS_LoadAudio'])) throw new Error('H3_WORKFLOW_REFERENCE_BINDING_INVALID:audio');
   if (!valid(bindings.videoNodeIds ?? [], ['LoadVideo', 'VHS_LoadVideo', 'VHS_LoadVideoPath'])) throw new Error('H3_WORKFLOW_REFERENCE_BINDING_INVALID:video');
   const ids = [...(bindings.imageNodeIds ?? []), ...(bindings.audioNodeIds ?? []), ...(bindings.videoNodeIds ?? [])];
   if (new Set(ids).size !== ids.length) throw new Error('H3_WORKFLOW_REFERENCE_BINDING_INVALID:duplicate');
+  if (boundary.mode === 'i2va-i2v' || boundary.mode === 'fl2va-i2v') {
+    if (JSON.stringify(bindings.imageNodeIds ?? []) !== JSON.stringify(boundary.imageNodeIds ?? [])) throw new Error('H3_I2V_IMAGE_BINDINGS_MUST_MATCH_FRAME_ORDER');
+    if ((bindings.audioNodeIds?.length ?? 0) || (bindings.videoNodeIds?.length ?? 0)) throw new Error('H3_I2V_AUDIO_VIDEO_REFERENCES_UNSUPPORTED');
+    return;
+  }
+  validateH3ReferenceSlotBindings(graph, boundary.h3NodeId, 'image', bindings.imageNodeIds ?? [], ['LoadImage']);
+  validateH3ReferenceSlotBindings(graph, boundary.h3NodeId, 'audio', bindings.audioNodeIds ?? [], ['LoadAudio', 'VHS_LoadAudio']);
+  validateH3ReferenceSlotBindings(graph, boundary.h3NodeId, 'video', bindings.videoNodeIds ?? [], ['LoadVideo', 'VHS_LoadVideo', 'VHS_LoadVideoPath']);
+  if (Object.entries(graph[boundary.h3NodeId]?.inputs ?? {}).some(([name, value]) => /^ref_video_audios\.ref_video_audio_\d+$/.test(name) && Array.isArray(value))) throw new Error('H3_WORKFLOW_VIDEO_AUDIO_BINDING_UNSUPPORTED');
 }
 
 function resolveNumber(value: unknown, graph: ComfyApiWorkflow, seen = new Set<string>()): number | undefined {
@@ -56,13 +65,28 @@ function resolveBoolean(value: unknown, graph: ComfyApiWorkflow, seen = new Set<
   return typeof node.inputs?.value === 'boolean' ? node.inputs.value : undefined;
 }
 
+function manualSigmaStepCount(value: unknown): number | undefined {
+  const values = typeof value === 'string' ? value.trim().split(/[\s,]+/) : Array.isArray(value) ? value : [];
+  if (values.length < 2 || values.some((item) => (typeof item !== 'number' && (typeof item !== 'string' || !item.trim())) || !Number.isFinite(Number(item)))) return undefined;
+  return values.length - 1;
+}
+
 function deriveSampling(graph: ComfyApiWorkflow, loras: string[]) {
   const scheduler = Object.values(graph).find((node) => node?.class_type === 'BasicScheduler');
   const pddScheduler = Object.values(graph).find((node) => node?.class_type === 'MiniMaxH3PDDAccScheduler');
   const pddApply = Object.values(graph).find((node) => node?.class_type === 'MiniMaxH3PDDAccApply');
+  const samplers = Object.values(graph).filter((node) => node?.class_type === 'SamplerCustomAdvanced');
+  const manualSigmaNodes = Object.entries(graph).filter(([, node]) => node?.class_type === 'ManualSigmas');
+  const manualSigmaSteps = samplers.length
+    ? samplers.map((sampler) => {
+      const sigmasId = Array.isArray(sampler.inputs?.sigmas) && typeof sampler.inputs.sigmas[0] === 'string' ? sampler.inputs.sigmas[0] : undefined;
+      return sigmasId && graph[sigmasId]?.class_type === 'ManualSigmas' ? manualSigmaStepCount(graph[sigmasId].inputs?.sigmas) : undefined;
+    })
+    : manualSigmaNodes.length === 1 ? [manualSigmaStepCount(manualSigmaNodes[0][1].inputs?.sigmas)] : [];
   const samplingSteps = scheduler ? resolveNumber(scheduler.inputs?.steps, graph)
     : typeof pddScheduler?.inputs?.nfe === 'string' && /^\d+$/.test(pddScheduler.inputs.nfe) ? Number(pddScheduler.inputs.nfe)
-      : typeof pddApply?.inputs?.nfe === 'string' && /^\d+$/.test(pddApply.inputs.nfe) ? Number(pddApply.inputs.nfe) : undefined;
+      : typeof pddApply?.inputs?.nfe === 'string' && /^\d+$/.test(pddApply.inputs.nfe) ? Number(pddApply.inputs.nfe)
+        : manualSigmaSteps.length && manualSigmaSteps.every((steps): steps is number => steps !== undefined) ? manualSigmaSteps.reduce((sum, steps) => sum + steps, 0) : undefined;
   const loraSteps = loras.some((value) => /8step/i.test(value)) ? 8 : loras.some((value) => /4step/i.test(value)) ? 4 : undefined;
   const qualityHint = samplingSteps === loraSteps && samplingSteps === 8 ? 'quality-8step'
     : samplingSteps === loraSteps && samplingSteps === 4 ? 'draft-4step' : 'unknown';
@@ -71,7 +95,6 @@ function deriveSampling(graph: ComfyApiWorkflow, loras: string[]) {
 
 export function createH3RefModWorkflowProfile(id: string, name: string, graph: ComfyApiWorkflow, referenceBindings: H3ReferenceBinding): H3WorkflowProfile {
   if ((referenceBindings.audioNodeIds?.length ?? 0) || (referenceBindings.videoNodeIds?.length ?? 0)) throw new Error('H3_REFMOD_REFERENCE_MEDIA_UNSUPPORTED');
-  validateReferenceBindings(graph, referenceBindings);
   const boundary = validateH3RefModWorkflow(graph, referenceBindings);
   const graphHash = createHash('sha256').update(canonicalJson(graph)).digest('hex');
   const loras = Object.values(graph).filter((node) => ['LoraLoaderModelOnly','MiniMaxH3PDDAccApply'].includes(node?.class_type ?? '')).map((node) => node.inputs?.lora_name ?? node.inputs?.pdd_file).filter((value): value is string => typeof value === 'string' && value.length > 0);
@@ -95,7 +118,7 @@ export function createH3WorkflowProfile(id: string, name: string, graph: ComfyAp
   const bindings = boundary.mode === 'r2v-2stage-veda' || boundary.mode === 'fl2va-i2v' || boundary.mode === 'i2va-i2v'
     ? { ...referenceBindings, imageNodeIds: referenceBindings?.imageNodeIds?.length ? referenceBindings.imageNodeIds : boundary.imageNodeIds }
     : referenceBindings;
-  if (bindings) validateReferenceBindings(graph, bindings);
+  validateReferenceBindings(graph, bindings ?? {}, boundary);
   if (boundary.mode === 'fl2va-i2v' || boundary.mode === 'i2va-i2v') {
     const boundImageIds = bindings?.imageNodeIds;
     if (!boundImageIds || boundImageIds.length !== boundary.imageNodeIds?.length || boundImageIds.some((id, index) => id !== boundary.imageNodeIds?.[index])) throw new Error('H3_I2V_IMAGE_BINDINGS_MUST_MATCH_FRAME_ORDER');
@@ -141,7 +164,7 @@ export function injectH3Inputs(profile: H3WorkflowProfile, input: { prompt: stri
   if (input.seed !== undefined) for (const id of (boundary.mode === 'r2v-2stage-veda' ? boundary.noiseNodeIds : undefined) ?? [boundary.noiseNodeId]) graph[id].inputs = { ...graph[id].inputs, noise_seed: input.seed };
   if (input.filenamePrefix && boundary.mode !== 'r2v-2stage-veda') save.inputs = { ...save.inputs, filename_prefix: input.filenamePrefix };
   const imageIds = profile.referenceBindings?.imageNodeIds ?? []; const audioIds = profile.referenceBindings?.audioNodeIds ?? []; const videoIds = profile.referenceBindings?.videoNodeIds ?? [];
-  if ((input.images?.length ?? 0) > imageIds.length || (input.audios?.length ?? 0) > audioIds.length || (input.videos?.length ?? 0) > videoIds.length) throw new Error('TOO_MANY_H3_REFERENCES');
+  if ((input.images?.length ?? 0) !== imageIds.length || (input.audios?.length ?? 0) !== audioIds.length || (input.videos?.length ?? 0) !== videoIds.length) throw new Error('H3_REFERENCE_COUNT_MISMATCH');
   if (boundary.mode === 'fl2va-i2v' && (input.images?.length !== 2 || imageIds.length !== 2)) throw new Error('H3_FL2VA_REQUIRES_FIRST_AND_LAST_IMAGES');
   if (boundary.mode === 'i2va-i2v' && (input.images?.length !== 1 || imageIds.length !== 1)) throw new Error('H3_I2VA_REQUIRES_ONE_FIRST_FRAME');
   input.images?.forEach((file, index) => { const node = graph[imageIds[index]]; if (!node) throw new Error('INVALID_H3_IMAGE_BINDING'); node.inputs = { ...node.inputs, image: file.subfolder ? `${file.subfolder}/${file.name}` : file.name }; });

@@ -40,6 +40,13 @@ export function buildMiniMaxDirectorDesignProposal(timeline: MiniMaxDirectorTime
         taskType: segment.taskType,
         continuityFromPrevious: segment.continuityFromPrevious,
         unresolvedMediaKeys: segmentRefs.filter((media) => !input.assetVersionByMediaKey?.[minimaxDirectorMediaKey(media)]).map(minimaxDirectorMediaKey),
+        referenceBindings: segmentRefs.map((media) => ({
+          mediaKey: minimaxDirectorMediaKey(media),
+          assetVersionId: input.assetVersionByMediaKey?.[minimaxDirectorMediaKey(media)] ?? null,
+          fileName: media.fileName,
+          kind: media.kind,
+          role: media.role,
+        })),
         directorPrompt: { prompt: segment.prompt, negativePrompt: segment.negativePrompt },
       },
     };

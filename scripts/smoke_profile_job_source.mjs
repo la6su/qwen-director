@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { createH3WorkflowProfile, injectH3Inputs } from '../packages/workflow-adapters/src/h3-profile.ts';
+import { withH3VideoPath } from './lib/h3-workflow-fixture.mjs';
 
 process.env.QWEN_STORAGE = 'postgres';
 process.env.QWEN_API_AUTOSTART = 'false';
@@ -12,11 +13,11 @@ const [projectId, sceneId, shotId] = [randomUUID(), randomUUID(), randomUUID()];
 const imageAssetVersionId = randomUUID();
 const imageSha256 = imageAssetVersionId.replaceAll('-', '').padEnd(64, 'c');
 const originalFetch = globalThis.fetch;
-const graph = {
+const graph = withH3VideoPath({
   h: { class_type: 'MiniMaxH3ReferenceToVideo', inputs: { prompt: 'Workflow template', width: 768, height: 432, length: 124 } },
   n: { class_type: 'RandomNoise', inputs: { noise_seed: 0 } },
   s: { class_type: 'SaveVideo', inputs: { filename_prefix: 'template' } },
-};
+}, { h3Id:'h', noiseId:'n', saveId:'s' });
 
 try {
   await pool.query('insert into projects(id,name) values($1,$2)', [projectId, 'profile-source-smoke']);
@@ -26,9 +27,17 @@ try {
 
   const saved = await app.inject({ method: 'POST', url: '/v1/workflow-profiles', payload: { id: 'source-smoke', name: 'Source', graph } });
   assert.equal(saved.statusCode, 201, saved.body);
-  const mockSchema = Object.fromEntries(Object.values(graph).map((node) => [node.class_type, {
-    input: { required: Object.fromEntries(Object.entries(node.inputs).map(([name, value]) => [name, [typeof value === 'number' ? 'INT' : typeof value === 'boolean' ? 'BOOLEAN' : 'STRING']])) }, output: [],
-  }]));
+  const mockSchema = {
+    MiniMaxH3ReferenceToVideo: { input:{required:{prompt:['STRING',{}],width:['INT',{}],height:['INT',{}],length:['INT',{}]}},output:['CONDITIONING','LATENT'] },
+    MiniMaxH3ImageToVideo: { input:{required:{first_frame:['IMAGE',{}],prompt:['STRING',{}]}},output:['CONDITIONING','LATENT'] },
+    LoadImage: { input:{required:{image:['STRING',{}]}},output:['IMAGE'] },
+    RandomNoise: { input:{required:{noise_seed:['INT',{}]}},output:['NOISE'] },
+    BasicGuider: { input:{required:{conditioning:['CONDITIONING',{}]}},output:['GUIDER'] },
+    SamplerCustomAdvanced: { input:{required:{noise:['NOISE',{}],guider:['GUIDER',{}],latent_image:['LATENT',{}]}},output:['LATENT'] },
+    VAEDecode: { input:{required:{samples:['LATENT',{}]}},output:['IMAGE'] },
+    VHS_VideoCombine: { input:{required:{images:['IMAGE',{}]}},output:['VIDEO'] },
+    SaveVideo: { input:{required:{video:['VIDEO',{}],filename_prefix:['STRING',{}]}},output:[] },
+  };
   globalThis.fetch = async () => new Response(JSON.stringify(mockSchema), { status: 200 });
   const activated = await app.inject({ method: 'POST', url: '/v1/workflow-profiles/source-smoke/revisions/1/activate' });
   globalThis.fetch = originalFetch;
@@ -59,12 +68,12 @@ try {
   assert.equal(injected.s.inputs.filename_prefix, `qwendirector/${job.json().jobId}`);
   assert.equal(plan.workflowProfile.graph.h.inputs.prompt, 'Workflow template');
 
-  const i2vaGraph = {
+  const i2vaGraph = withH3VideoPath({
     h: { class_type: 'MiniMaxH3ImageToVideo', inputs: { first_frame: ['image', 0], prompt: 'Workflow template' } },
     n: { class_type: 'RandomNoise', inputs: {} },
     s: { class_type: 'SaveVideo', inputs: {} },
     image: { class_type: 'LoadImage', inputs: { image: 'template.png' } },
-  };
+  }, { h3Id:'h', noiseId:'n', saveId:'s' });
   const i2vaSaved = await app.inject({ method: 'POST', url: '/v1/workflow-profiles', payload: { id: 'source-smoke-i2va', name: 'I2VA source', graph: i2vaGraph } });
   assert.equal(i2vaSaved.statusCode, 201, i2vaSaved.body);
   const i2vaSchema = {

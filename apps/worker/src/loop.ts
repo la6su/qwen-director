@@ -2,6 +2,14 @@ export interface WorkerConfig { apiBaseUrl: string; nodeId: string; pollMs?: num
 export type ClaimedJob = { jobId: string; attemptId: string; fencingToken: number; planHash: string; adapterId?: string; plan?: Record<string, unknown>; requiredCapabilities?: Record<string, unknown> };
 export type Executor = (job: ClaimedJob) => Promise<void>;
 
+export class WorkerAttemptExecutionError extends Error {
+  constructor(readonly jobId: string, readonly attemptId: string, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`WORKER_ATTEMPT_FAILED:${attemptId}:${detail}`, { cause });
+    this.name = 'WorkerAttemptExecutionError';
+  }
+}
+
 export class WorkerLoop {
   private stopped = false;
   constructor(private readonly config: WorkerConfig, private readonly executor?: Executor) {}
@@ -13,7 +21,10 @@ export class WorkerLoop {
     if (response.status === 204 || response.status === 404) return 'idle';
     if (!response.ok) throw new Error(`CLAIM_FAILED_${response.status}`);
     const job = await response.json() as ClaimedJob;
-    if (this.executor) await this.executor(job);
+    if (this.executor) {
+      try { await this.executor(job); }
+      catch (error) { throw new WorkerAttemptExecutionError(job.jobId, job.attemptId, error); }
+    }
     return 'claimed';
   }
 
@@ -24,7 +35,11 @@ export class WorkerLoop {
       } catch (error) {
         // The API may restart independently; keep the worker alive and retry.
         if (this.stopped || signal?.aborted) break;
-        console.error(`[worker] claim failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof WorkerAttemptExecutionError) {
+          console.error(`[worker] execution failed for job ${error.jobId}, attempt ${error.attemptId}: ${error.cause instanceof Error ? error.cause.message : String(error.cause)}`);
+        } else {
+          console.error(`[worker] claim failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       if (!this.stopped && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, this.config.pollMs ?? 1000));
     }

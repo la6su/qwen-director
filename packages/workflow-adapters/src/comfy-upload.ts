@@ -15,3 +15,26 @@ export async function uploadComfyReference(baseUrl: string, content: Uint8Array,
   if (!result.name) throw new Error('COMFY_REFERENCE_UPLOAD_INVALID_RESPONSE');
   return { name: result.name, subfolder: result.subfolder ?? '', type: result.type ?? type };
 }
+
+/** Give every immutable reference binding an attempt-scoped ComfyUI input path.
+ * ComfyUI's upload endpoint overwrites matching names, so source basenames alone
+ * are unsafe when two references come from different directories or jobs.
+ */
+export function comfyReferenceUploadTarget(input: {
+  attemptId: string;
+  assetVersionId: string;
+  role: string;
+  index: number;
+  filename: string;
+}): { filename: string; subfolder: string } {
+  if (!/^[a-zA-Z0-9_-]+$/.test(input.attemptId) || !/^[a-zA-Z0-9_-]+$/.test(input.assetVersionId)) throw new Error('INVALID_COMFY_REFERENCE_ID');
+  if (!Number.isSafeInteger(input.index) || input.index < 0) throw new Error('INVALID_COMFY_REFERENCE_INDEX');
+  if (!input.filename || /[\\/]/.test(input.filename)) throw new Error('INVALID_REFERENCE_FILENAME');
+  const extension = input.filename.match(/\.[a-zA-Z0-9]{1,10}$/)?.[0]?.toLowerCase() ?? '';
+  const stem = (extension ? input.filename.slice(0, -extension.length) : input.filename).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 72) || 'reference';
+  const role = input.role.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24) || 'reference';
+  return {
+    filename: `qd-${input.index}-${input.assetVersionId.slice(0, 12)}-${role}-${stem}${extension}`,
+    subfolder: `qwendirector_refs/${input.attemptId}`,
+  };
+}

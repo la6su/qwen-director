@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { parseMiniMaxDirectorTimeline } from '../packages/workflow-adapters/src/minimax-director-timeline.ts';
+import { minimaxDirectorMediaKey, parseMiniMaxDirectorTimeline } from '../packages/workflow-adapters/src/minimax-director-timeline.ts';
+
+const mediaKey = minimaxDirectorMediaKey;
 
 const args = new Set(process.argv.slice(2));
 const workflowPath = process.argv.slice(2).find((arg) => !arg.startsWith('--'));
@@ -31,24 +33,31 @@ for (const value of directorNode.widgets_values ?? []) {
 }
 if (!timeline) throw new Error('AIMIXER_TIMELINE_V5_NOT_FOUND');
 
-const resolved = await Promise.all(timeline.unresolvedMedia.map(async (media) => {
+const physicalMedia = new Map();
+for (const media of timeline.unresolvedMedia) {
+  const physicalKey = JSON.stringify([media.kind, media.storageType, media.subfolder, media.fileName]);
+  const group = physicalMedia.get(physicalKey) ?? { media, bindings: [] };
+  group.bindings.push({ role: media.role, mediaKey: mediaKey(media) });
+  physicalMedia.set(physicalKey, group);
+}
+const resolved = await Promise.all([...physicalMedia.values()].map(async ({ media, bindings }) => {
   const query = new URLSearchParams({ filename: media.fileName, subfolder: media.subfolder, type: media.storageType });
   const response = await fetch(new URL(`/view?${query}`, comfyBase));
-  if (!response.ok) return { media, status: response.status };
+  if (!response.ok) return { media, bindings, status: response.status };
   const declaredLength = Number(response.headers.get('content-length') ?? 0);
   if (declaredLength > maxBytes) throw new Error(`AIMIXER_MEDIA_TOO_LARGE:${basename(media.fileName)}`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (!bytes.length || bytes.length > maxBytes) throw new Error(`AIMIXER_MEDIA_SIZE_INVALID:${basename(media.fileName)}`);
   const mimeType = response.headers.get('content-type')?.split(';')[0] || 'application/octet-stream';
   const sha256 = createHash('sha256').update(bytes).digest('hex');
-  return { media, status: response.status, bytes, mimeType, sha256 };
+  return { media, bindings, status: response.status, bytes, mimeType, sha256 };
 }));
 const missing = resolved.filter((item) => !item.bytes);
 if (missing.length) {
-  console.log(JSON.stringify({ mode: commit ? 'commit' : 'dry-run', found: resolved.length - missing.length, missing: missing.map(({ media, status }) => ({ file: basename(media.fileName), status })), imported: 0 }));
+  console.log(JSON.stringify({ mode: commit ? 'commit' : 'dry-run', found: resolved.length - missing.length, missing: missing.map(({ media, bindings, status }) => ({ file: basename(media.fileName), kind: media.kind, bindings, status })), imported: 0 }));
   if (commit) process.exitCode = 2;
 } else if (!commit) {
-  console.log(JSON.stringify({ mode: 'dry-run', found: resolved.length, missing: [], totalBytes: resolved.reduce((sum, item) => sum + item.bytes.length, 0), imported: 0 }));
+  console.log(JSON.stringify({ mode: 'dry-run', found: resolved.length, missing: [], totalBytes: resolved.reduce((sum, item) => sum + item.bytes.length, 0), references: resolved.flatMap(({ media, bindings }) => bindings.map((binding) => ({ file: basename(media.fileName), kind: media.kind, ...binding }))), imported: 0 }));
 } else {
   const actor = process.env.QWEN_IMPORT_ACTOR;
   if (!actor?.trim()) throw new Error('QWEN_IMPORT_ACTOR_REQUIRED');
@@ -62,7 +71,7 @@ if (missing.length) {
     });
     if (!response.ok) throw new Error(`QWEN_ASSET_IMPORT_FAILED:${response.status}`);
     const body = await response.json();
-    imports.push({ kind: item.media.kind, sha256: item.sha256, assetVersionId: body.assetVersionId });
+    imports.push(...item.bindings.map((binding) => ({ kind: item.media.kind, ...binding, sha256: item.sha256, assetVersionId: body.assetVersionId })));
   }
-  console.log(JSON.stringify({ mode: 'commit', found: resolved.length, imported: imports.length, assets: imports }));
+  console.log(JSON.stringify({ mode: 'commit', found: resolved.length, imported: resolved.length, bindings: imports.length, assets: imports }));
 }

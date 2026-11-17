@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createH3WorkflowProfile, injectH3Inputs } from '../packages/workflow-adapters/src/h3-profile.ts';
 import { compileH3Ref2VAPrompt } from '../packages/contracts/src/prompt.ts';
-const p=createH3WorkflowProfile('p','h3',{'a':{class_type:'MiniMaxH3ReferenceToVideo',inputs:{prompt:'old'}},'b':{class_type:'RandomNoise',inputs:{}},'c':{class_type:'SaveVideo',inputs:{}}});
+import { withH3VideoPath } from './lib/h3-workflow-fixture.mjs';
+const p=createH3WorkflowProfile('p','h3',withH3VideoPath({'a':{class_type:'MiniMaxH3ReferenceToVideo',inputs:{prompt:'old'}},'b':{class_type:'RandomNoise',inputs:{}},'c':{class_type:'SaveVideo',inputs:{}}},{h3Id:'a',noiseId:'b',saveId:'c'}));
 const compiled=compileH3Ref2VAPrompt({prompt:'A quiet room reveal',camera:'Slow push in',sound:'Soft room tone',music:'N/A'},[{type:'image',role:'set'}]);
 const graph=injectH3Inputs(p,{prompt:compiled,width:1920,height:1080,length:124,seed:7,filenamePrefix:'qwendirector/job'});
 assert.equal(graph.a.inputs.prompt,compiled);

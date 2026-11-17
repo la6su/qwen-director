@@ -1,10 +1,9 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
+import databaseUrl from './lib/require-database-url.mjs';
 
-const pool = process.env.DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL })
-  : new pg.Pool({ host: '/var/run/postgresql', user: process.env.PGUSER ?? 'la6', database: process.env.PGDATABASE ?? 'qwendirector' });
+const pool = new pg.Pool({ connectionString: databaseUrl });
 const files = (await readdir('packages/storage/migrations')).filter((f) => /^\d{3}_.+\.sql$/.test(f)).sort();
 const client = await pool.connect();
 try {

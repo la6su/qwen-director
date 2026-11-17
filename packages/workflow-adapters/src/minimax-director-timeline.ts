@@ -1,5 +1,6 @@
 export type DirectorMediaRef = {
   kind: 'image' | 'video' | 'audio';
+  role: 'picture' | 'first-frame' | 'last-frame' | 'video' | 'audio';
   fileName: string;
   subfolder: string;
   storageType: string;
@@ -34,8 +35,8 @@ export type MiniMaxDirectorTimeline = {
   source: Record<string, unknown>;
 };
 
-export function minimaxDirectorMediaKey(media: Pick<DirectorMediaRef, 'kind' | 'storageType' | 'subfolder' | 'fileName'>): string {
-  return JSON.stringify([media.kind, media.storageType, media.subfolder, media.fileName]);
+export function minimaxDirectorMediaKey(media: Pick<DirectorMediaRef, 'kind' | 'role' | 'storageType' | 'subfolder' | 'fileName'>): string {
+  return JSON.stringify([media.kind, media.role, media.storageType, media.subfolder, media.fileName]);
 }
 
 type RawMedia = { fileName?: unknown; imageFile?: unknown; videoFile?: unknown; audioFile?: unknown; subfolder?: unknown; type?: unknown; index?: unknown };
@@ -63,7 +64,7 @@ export function parseMiniMaxDirectorTimeline(input: unknown): MiniMaxDirectorTim
   const refMaxSize = positiveInt(source.refMaxSize, 'AIMIXER_TIMELINE_REF_SIZE_INVALID');
   const segments: DirectorTimelineSegment[] = [];
   const mediaByKey = new Map<string, DirectorMediaRef>();
-  const collectMedia = (values: unknown, scope: 'global' | 'segment', segmentId?: string, kindHint?: DirectorMediaRef['kind']) => {
+  const collectMedia = (values: unknown, scope: 'global' | 'segment', segmentId?: string, kindHint?: DirectorMediaRef['kind'], roleHint?: DirectorMediaRef['role']) => {
     const entries = Array.isArray(values) ? values : values && typeof values === 'object' ? [values] : [];
     for (const raw of entries) {
       const item = raw as RawMedia;
@@ -72,9 +73,10 @@ export function parseMiniMaxDirectorTimeline(input: unknown): MiniMaxDirectorTim
       if (!fileName) continue; // Empty picker slots are UI state, not references.
       const storageType = nonEmpty(item.type) || 'input';
       const kind: DirectorMediaRef['kind'] = nonEmpty(item.audioFile) ? 'audio' : nonEmpty(item.videoFile) ? 'video' : kindHint ?? 'image';
+      const role: DirectorMediaRef['role'] = roleHint ?? (kind === 'audio' ? 'audio' : kind === 'video' ? 'video' : 'picture');
       const subfolder = nonEmpty(item.subfolder);
-      const key = minimaxDirectorMediaKey({ kind, storageType, subfolder, fileName });
-      const ref = mediaByKey.get(key) ?? { kind, fileName, subfolder, storageType, scopes: [], segmentIds: [] };
+      const key = minimaxDirectorMediaKey({ kind, role, storageType, subfolder, fileName });
+      const ref = mediaByKey.get(key) ?? { kind, role, fileName, subfolder, storageType, scopes: [], segmentIds: [] };
       if (!ref.scopes.includes(scope)) ref.scopes.push(scope);
       if (segmentId && !ref.segmentIds.includes(segmentId)) ref.segmentIds.push(segmentId);
       mediaByKey.set(key, ref);
@@ -96,7 +98,7 @@ export function parseMiniMaxDirectorTimeline(input: unknown): MiniMaxDirectorTim
     previousEnd = end;
     collectMedia(raw.refs, 'segment', id); collectMedia(raw.refVideos, 'segment', id); collectMedia(raw.refAudios, 'segment', id);
     collectMedia(raw.referenceVideo, 'segment', id, 'video'); collectMedia(raw.genImage, 'segment', id, 'image');
-    collectMedia(raw.startImage, 'segment', id, 'image'); collectMedia(raw.endImage, 'segment', id, 'image');
+    collectMedia(raw.startImage, 'segment', id, 'image', 'first-frame'); collectMedia(raw.endImage, 'segment', id, 'image', 'last-frame');
     const refs = [...list(raw.refs), ...list(raw.refVideos), ...list(raw.refAudios)].map((value) => record(value)).filter((item) => nonEmpty(item.fileName) || nonEmpty(item.imageFile) || nonEmpty(item.videoFile) || nonEmpty(item.audioFile));
     segments.push({
       id, startFrame, frameCount, durationSeconds: frameCount / fps,
